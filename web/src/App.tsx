@@ -503,8 +503,6 @@ function App() {
       )}
 
       <footer className="footer">
-        Данные: <code>госы.docx</code> (парсер: <code>scripts/parse_docx_questions.py</code>)
-        {' · '}
         <button type="button" className="linkLike" onClick={openAdmin}>
           Админ-статистика
         </button>
