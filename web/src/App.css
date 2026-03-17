@@ -412,6 +412,11 @@ button:disabled {
   .formRow {
     flex-direction: column;
     align-items: stretch;
+    gap: 10px;
+  }
+
+  label {
+    gap: 5px;
   }
 
   .check {
@@ -423,5 +428,23 @@ button:disabled {
   .actions button {
     flex: 1 1 auto;
     width: 100%;
+  }
+}
+
+@media (max-width: 420px) {
+  .formRow {
+    gap: 8px;
+  }
+
+  label {
+    gap: 4px;
+  }
+
+  .help {
+    margin-top: -2px;
+  }
+
+  .check {
+    padding: 8px 10px;
   }
 }
