@@ -27,4 +27,4 @@ npm run dev
 Админ-доступ настраивается на сервере (а не во фронтенде):
 
 - `ADMIN_LOGIN` (по умолчанию `admin`)
-- `ADMIN_PASSWORD` (обязателен)
+- `ADMIN_PASSWORD` (по умолчанию `BeeIT@2026`)

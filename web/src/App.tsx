@@ -458,7 +458,7 @@ function App() {
   const [activeNickname, setActiveNickname] = useState<string | null>(null)
   const [adminAuthed, setAdminAuthed] = useState<boolean>(false)
   const [adminSelectedUsers, setAdminSelectedUsers] = useState<Record<string, boolean>>({})
-  const [adminLogin, setAdminLogin] = useState<string>('admin')
+  const [adminLogin, setAdminLogin] = useState<string>('')
   const [adminPassword, setAdminPassword] = useState<string>('')
   const [adminAuthBusy, setAdminAuthBusy] = useState<boolean>(false)
 
@@ -1318,8 +1318,7 @@ function App() {
 	                  Войти
 	                </button>
 	              </div>
-	              <div className="meta">Доступ задается на сервере (ADMIN_LOGIN/ADMIN_PASSWORD).</div>
-	            </>
+            </>
 	          ) : (
 	            <>
 	              <div className="actions">

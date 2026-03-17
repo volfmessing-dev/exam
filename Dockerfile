@@ -17,6 +17,7 @@ ENV NODE_ENV=production
 ENV PORT=8080
 ENV STATIC_DIR=/app/public
 ENV STATS_FILE=/data/stats.json
+ENV ADMIN_PASSWORD=BeeIT@2026
 
 RUN mkdir -p /data
 
