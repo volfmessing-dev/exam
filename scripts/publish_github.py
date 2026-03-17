@@ -99,6 +99,7 @@ def main() -> int:
     if branch != "main":
         die(f"Current branch is '{branch}', expected 'main'")
 
+    owner_is_self = False
     if not owner:
         try:
             me = gh_api(token, "GET", "/user")
@@ -107,6 +108,14 @@ def main() -> int:
         owner = me.get("login")
         if not owner:
             die("Failed to resolve GITHUB_OWNER from /user")
+        owner_is_self = True
+    else:
+        # Best effort: detect whether the target owner equals the current user.
+        try:
+            me = gh_api(token, "GET", "/user")
+            owner_is_self = (me.get("login") == owner)
+        except Exception:
+            owner_is_self = False
 
     # Check existence, create if missing
     exists = True
@@ -120,12 +129,20 @@ def main() -> int:
 
     if not exists:
         try:
-            gh_api(
-                token,
-                "POST",
-                "/user/repos",
-                {"name": repo, "private": private, "auto_init": False},
-            )
+            if owner_is_self:
+                gh_api(
+                    token,
+                    "POST",
+                    "/user/repos",
+                    {"name": repo, "private": private, "auto_init": False},
+                )
+            else:
+                gh_api(
+                    token,
+                    "POST",
+                    f"/orgs/{owner}/repos",
+                    {"name": repo, "private": private, "auto_init": False},
+                )
         except urllib.error.HTTPError as e:
             die(f"Failed to create repo {owner}/{repo} (HTTP {e.code}).")
 
@@ -164,4 +181,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
