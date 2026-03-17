@@ -62,7 +62,7 @@ const STATS_KEY_V2 = 'gosi_stats_v2'
 const STATS_OUTBOX_KEY_V1 = 'gosi_stats_outbox_v1'
 const RUN_KEY_V1 = 'gosi_run_v1'
 const NICKNAME_KEY = 'gosi_nickname'
-const ADMIN_PASSWORD_KEY = 'gosi_admin_password'
+const ADMIN_TOKEN_KEY = 'gosi_admin_token'
 
 const STATS_API_BASE = String(import.meta.env.VITE_STATS_API_BASE || '').replace(/\/+$/, '')
 
@@ -210,19 +210,43 @@ async function fetchJsonWithTimeout(url: string, ms: number): Promise<unknown | 
   }
 }
 
-async function postJsonWithTimeout(url: string, body: unknown, ms: number): Promise<boolean> {
+async function postJsonWithTimeout(url: string, body: unknown, ms: number, extra?: { headers?: Record<string, string> }): Promise<boolean> {
   const ctrl = new AbortController()
   const id = window.setTimeout(() => ctrl.abort(), ms)
   try {
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...(extra?.headers ?? {}) },
       body: JSON.stringify(body),
       signal: ctrl.signal,
     })
     return res.ok
   } catch {
     return false
+  } finally {
+    window.clearTimeout(id)
+  }
+}
+
+async function postJsonGetJsonWithTimeout(
+  url: string,
+  body: unknown,
+  ms: number,
+  extra?: { headers?: Record<string, string> }
+): Promise<unknown | null> {
+  const ctrl = new AbortController()
+  const id = window.setTimeout(() => ctrl.abort(), ms)
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(extra?.headers ?? {}) },
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+    })
+    if (!res.ok) return null
+    return (await res.json()) as unknown
+  } catch {
+    return null
   } finally {
     window.clearTimeout(id)
   }
@@ -238,21 +262,61 @@ async function probeRemote(): Promise<boolean> {
   return !!res && typeof res === 'object'
 }
 
-async function hydrateStatsFromRemote(): Promise<void> {
-  const remoteRaw = await fetchJsonWithTimeout(apiUrl('/api/stats'), 2500)
-  if (!remoteRaw || typeof remoteRaw !== 'object') return
-  const remote = remoteRaw as Partial<StatsStore>
-  if (remote.version !== 2 || !remote.users || typeof remote.users !== 'object') return
+async function hydrateUserStatsFromRemote(nick: string): Promise<void> {
+  const clean = nick.trim()
+  if (!clean) return
 
-  // Make server snapshot the local baseline (so stats survive localStorage resets),
-  // then re-apply local pending deltas (outbox) on top.
-  saveStats(remote as StatsStore)
+  const remoteRaw = await fetchJsonWithTimeout(apiUrl(`/api/stats/user?nick=${encodeURIComponent(clean)}`), 2500)
+  if (!remoteRaw || typeof remoteRaw !== 'object') return
+  const payload = remoteRaw as { ok?: boolean; version?: number; user?: unknown }
+  if (!payload.ok || payload.version !== 1) return
+
+  const userRaw = (payload as { user?: unknown }).user
+  if (userRaw === null || userRaw === undefined) return
+  if (typeof userRaw !== 'object') return
+  const user = userRaw as Partial<UserStats>
+  if (typeof user.testsCompleted !== 'number') return
+  if (typeof user.questionsAnswered !== 'number') return
+  if (typeof user.questionsCorrect !== 'number') return
+  if (typeof user.updatedAt !== 'number') return
+  if (!user.blocks || typeof user.blocks !== 'object') return
+
+  const store = loadStats()
+  saveStats({ ...store, users: { ...store.users, [clean]: user as UserStats } })
+
+  // Re-apply local pending deltas (outbox) on top.
   const outbox = loadOutbox()
   if (!outbox.length) return
-
   const now = Date.now()
   const merged = outbox.reduce((acc, d) => applyDeltaToStore(acc, d, now), loadStats())
   saveStats(merged)
+}
+
+async function hydrateStatsFromRemoteAdmin(token: string): Promise<boolean> {
+  const ctrl = new AbortController()
+  const id = window.setTimeout(() => ctrl.abort(), 3500)
+  try {
+    const res = await fetch(apiUrl('/api/admin/stats'), { signal: ctrl.signal, headers: { Authorization: `Bearer ${token}` } })
+    if (!res.ok) return false
+    const json = (await res.json()) as unknown
+    if (!json || typeof json !== 'object') return false
+    const remote = json as Partial<StatsStore>
+    if (remote.version !== 2 || !remote.users || typeof remote.users !== 'object') return false
+
+    saveStats(remote as StatsStore)
+    const outbox = loadOutbox()
+    if (!outbox.length) return true
+
+    const now = Date.now()
+    const merged = outbox.reduce((acc, d) => applyDeltaToStore(acc, d, now), loadStats())
+    saveStats(merged)
+    void flushOutbox()
+    return true
+  } catch {
+    return false
+  } finally {
+    window.clearTimeout(id)
+  }
 }
 
 async function flushOutbox(): Promise<void> {
@@ -272,13 +336,32 @@ async function flushOutbox(): Promise<void> {
   saveOutbox([])
 }
 
-function getAdminPassword(): string {
-  return import.meta.env.VITE_ADMIN_PASSWORD || localStorage.getItem(ADMIN_PASSWORD_KEY) || ''
+async function adminVerifyRemote(token: string): Promise<boolean> {
+  const ctrl = new AbortController()
+  const id = window.setTimeout(() => ctrl.abort(), 2500)
+  try {
+    const res = await fetch(apiUrl('/api/admin/verify'), { signal: ctrl.signal, headers: { Authorization: `Bearer ${token}` } })
+    if (!res.ok) return false
+    const json = (await res.json()) as unknown
+    return !!json && typeof json === 'object' && !!(json as { ok?: boolean }).ok
+  } catch {
+    return false
+  } finally {
+    window.clearTimeout(id)
+  }
 }
 
-async function deleteUsersRemote(nicks: string[]): Promise<boolean> {
+async function adminLoginRemote(login: string, password: string): Promise<{ token: string } | null> {
+  const json = await postJsonGetJsonWithTimeout(apiUrl('/api/admin/login'), { version: 1, login, password }, 4000)
+  if (!json || typeof json !== 'object') return null
+  const token = (json as { token?: unknown }).token
+  if (typeof token !== 'string' || !token) return null
+  return { token }
+}
+
+async function deleteUsersRemote(token: string, nicks: string[]): Promise<boolean> {
   const payload = { version: 1, nicks }
-  return await postJsonWithTimeout(apiUrl('/api/stats/users/delete'), payload, 4000)
+  return await postJsonWithTimeout(apiUrl('/api/stats/users/delete'), payload, 4000, { headers: { Authorization: `Bearer ${token}` } })
 }
 
 function upsertBlock(prev: Record<string, BlockStat>, block: string, ok: boolean): Record<string, BlockStat> {
@@ -375,6 +458,9 @@ function App() {
   const [activeNickname, setActiveNickname] = useState<string | null>(null)
   const [adminAuthed, setAdminAuthed] = useState<boolean>(false)
   const [adminSelectedUsers, setAdminSelectedUsers] = useState<Record<string, boolean>>({})
+  const [adminLogin, setAdminLogin] = useState<string>('admin')
+  const [adminPassword, setAdminPassword] = useState<string>('')
+  const [adminAuthBusy, setAdminAuthBusy] = useState<boolean>(false)
 
   const [quizSourceIndices, setQuizSourceIndices] = useState<number[]>([])
   const [quiz, setQuiz] = useState<Question[]>([])
@@ -399,6 +485,7 @@ function App() {
   const statsSyncedBlockTimeCommittedMsRef = useRef<Record<string, number>>({})
   const remoteAvailableRef = useRef<boolean>(false)
   const lastRemoteAttemptAtRef = useRef<number>(0)
+  const adminTokenRef = useRef<string | null>(sessionStorage.getItem(ADMIN_TOKEN_KEY))
 
   const [timerNow, setTimerNow] = useState<number>(() => Date.now())
   const [questionStartedAt, setQuestionStartedAt] = useState<number | null>(null)
@@ -417,19 +504,44 @@ function App() {
       const ok = await probeRemote()
       remoteAvailableRef.current = ok
       if (!ok) return
-      await hydrateStatsFromRemote()
       await flushOutbox()
     }
     void init()
   }, [])
 
-  const syncRemoteNow = async (): Promise<void> => {
+  useEffect(() => {
+    const token = sessionStorage.getItem(ADMIN_TOKEN_KEY)
+    if (!token) return
+    const verify = async () => {
+      const ok = await adminVerifyRemote(token)
+      if (!ok) {
+        sessionStorage.removeItem(ADMIN_TOKEN_KEY)
+        adminTokenRef.current = null
+        setAdminAuthed(false)
+        return
+      }
+      adminTokenRef.current = token
+      setAdminAuthed(true)
+    }
+    void verify()
+  }, [])
+
+  const syncAdminNow = async (token: string): Promise<void> => {
     const ok = await probeRemote()
     remoteAvailableRef.current = ok
     if (!ok) return
-    await hydrateStatsFromRemote()
+    await hydrateStatsFromRemoteAdmin(token)
     await flushOutbox()
   }
+
+  useEffect(() => {
+    if (screen !== 'admin') return
+    if (!adminAuthed) return
+    const token = adminTokenRef.current
+    if (!token) return
+    void syncAdminNow(token)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [screen, adminAuthed])
 
   const maybeSyncRemote = (now = Date.now()) => {
     const cooldownMs = 5000
@@ -441,7 +553,6 @@ function App() {
         const ok = await probeRemote()
         remoteAvailableRef.current = ok
         if (!ok) return
-        await hydrateStatsFromRemote()
       }
       await flushOutbox()
     }
@@ -745,7 +856,7 @@ function App() {
     setBlockTimeCommittedMs(blockTimeCommittedMsRef.current)
   }
 
-  const start = () => {
+  const start = async () => {
     const nick = nickname.trim()
     const filteredIndices =
       discipline === '__all__'
@@ -780,7 +891,14 @@ function App() {
     setTimeCommittedMs(0)
     setBlockTimeCommittedMs({})
 
-    if (nick) ensureUserInStats(nick, now)
+    if (nick) {
+      if (!remoteAvailableRef.current) remoteAvailableRef.current = await probeRemote()
+      if (remoteAvailableRef.current) {
+        await hydrateUserStatsFromRemote(nick)
+        await flushOutbox()
+      }
+      ensureUserInStats(nick, now)
+    }
 
     setQuizSourceIndices(nextIndices)
     setQuiz(next)
@@ -903,26 +1021,42 @@ function App() {
   }
 
   const openAdmin = () => {
-    const configured = getAdminPassword()
-    if (!configured) {
-      const nextPw = window.prompt('Пароль не настроен. Задайте новый (сохранится в этом браузере)')
-      if (!nextPw) return
-      localStorage.setItem(ADMIN_PASSWORD_KEY, nextPw)
-      setAdminAuthed(true)
-      setAdminSelectedUsers({})
-      setScreen('admin')
-      void syncRemoteNow()
-      return
-    }
-
-    const pw = window.prompt('Пароль администратора (логин: admin)')
-    if (pw === null) return
-    if (pw !== configured) return void window.alert('Неверный пароль')
-
-    setAdminAuthed(true)
     setAdminSelectedUsers({})
     setScreen('admin')
-    void syncRemoteNow()
+  }
+
+  const adminLoginSubmit = async () => {
+    if (adminAuthBusy) return
+    const login = adminLogin.trim()
+    const password = adminPassword
+    if (!login || !password) return
+
+    setAdminAuthBusy(true)
+    try {
+      const ok = await probeRemote()
+      remoteAvailableRef.current = ok
+      if (!ok) return void window.alert('Сервер статистики недоступен')
+
+      const res = await adminLoginRemote(login, password)
+      if (!res) return void window.alert('Неверный логин или пароль')
+
+      adminTokenRef.current = res.token
+      sessionStorage.setItem(ADMIN_TOKEN_KEY, res.token)
+      setAdminAuthed(true)
+      setAdminPassword('')
+      setAdminSelectedUsers({})
+      await syncAdminNow(res.token)
+    } finally {
+      setAdminAuthBusy(false)
+    }
+  }
+
+  const adminLogout = () => {
+    sessionStorage.removeItem(ADMIN_TOKEN_KEY)
+    adminTokenRef.current = null
+    setAdminAuthed(false)
+    setAdminSelectedUsers({})
+    setAdminPassword('')
   }
 
   const deleteSelectedUsers = async () => {
@@ -937,10 +1071,13 @@ function App() {
     remoteAvailableRef.current = ok
     if (!ok) return void window.alert('Сервер статистики недоступен (удаление отключено)')
 
+    const token = adminTokenRef.current
+    if (!token) return void window.alert('Требуется вход в админку')
+
     const confirm = window.confirm(`Удалить выбранные записи (${selected.length})?`)
     if (!confirm) return
 
-    const remoteOk = await deleteUsersRemote(selected)
+    const remoteOk = await deleteUsersRemote(token, selected)
     if (!remoteOk) return void window.alert('Не удалось удалить на сервере')
 
     const nextUsers = { ...store.users }
@@ -948,7 +1085,7 @@ function App() {
     saveStats({ ...store, users: nextUsers })
     saveOutbox(loadOutbox().filter((d) => !selected.includes(d.nick)))
     setAdminSelectedUsers({})
-    await syncRemoteNow()
+    await syncAdminNow(token)
   }
 
   return (
@@ -1000,7 +1137,7 @@ function App() {
             В базе: <b>{data.questions.length}</b> вопросов
           </div>
           <div className="actions">
-            <button className="primary" onClick={start}>
+            <button className="primary" onClick={() => void start()}>
               Начать
             </button>
           </div>
@@ -1135,7 +1272,7 @@ function App() {
             </div>
           )}
           <div className="actions">
-            <button className="primary" onClick={start} disabled={quiz.length === 0}>
+            <button className="primary" onClick={() => void start()} disabled={quiz.length === 0}>
               Пройти еще раз
             </button>
             <button className="ghost" onClick={reset}>
@@ -1145,15 +1282,48 @@ function App() {
         </section>
       )}
 
-      {screen === 'admin' && (
-        <section className="panel">
-          <h1>Админ: статистика</h1>
-          {!adminAuthed ? (
-            <div className="meta">Доступ закрыт</div>
-          ) : (
-            <>
-              <div className="actions">
-                <button
+	      {screen === 'admin' && (
+	        <section className="panel">
+	          <h1>Админ: статистика</h1>
+	          {!adminAuthed ? (
+	            <>
+	              <div className="formRow">
+	                <label className="field">
+	                  Логин
+	                  <input
+	                    value={adminLogin}
+	                    onChange={(e) => setAdminLogin(e.target.value)}
+	                    placeholder="admin"
+	                    inputMode="text"
+	                    autoComplete="username"
+	                  />
+	                </label>
+	                <label className="field">
+	                  Пароль
+	                  <input
+	                    type="password"
+	                    value={adminPassword}
+	                    onChange={(e) => setAdminPassword(e.target.value)}
+	                    placeholder="••••••••"
+	                    autoComplete="current-password"
+	                  />
+	                </label>
+	              </div>
+	              <div className="actions">
+	                <button
+	                  className="primary"
+	                  onClick={() => void adminLoginSubmit()}
+	                  disabled={adminAuthBusy || !adminLogin.trim() || !adminPassword}
+	                >
+	                  Войти
+	                </button>
+	              </div>
+	              <div className="meta">Доступ задается на сервере (ADMIN_LOGIN/ADMIN_PASSWORD).</div>
+	            </>
+	          ) : (
+	            <>
+	              <div className="actions">
+	                <button
                   className="ghost"
                   onClick={() => {
                     const store = loadStats()
@@ -1229,23 +1399,24 @@ function App() {
               </div>
             </>
           )}
-          <div className="actions">
-            <button className="primary" onClick={() => setScreen('setup')}>
-              Назад
-            </button>
-            <button
-              className="ghost"
-              onClick={() => {
-                setAdminAuthed(false)
-                setAdminSelectedUsers({})
-                setScreen('setup')
-              }}
-            >
-              Выйти
-            </button>
-          </div>
-        </section>
-      )}
+	          <div className="actions">
+	            <button className="primary" onClick={() => setScreen('setup')}>
+	              Назад
+	            </button>
+	            {adminAuthed && (
+	              <button
+	                className="ghost"
+	                onClick={() => {
+	                  adminLogout()
+	                  setScreen('setup')
+	                }}
+	              >
+	                Выйти
+	              </button>
+	            )}
+	          </div>
+	        </section>
+	      )}
 
       <footer className="footer">
         <button type="button" className="linkLike" onClick={openAdmin}>

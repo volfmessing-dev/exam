@@ -1,5 +1,6 @@
 /* eslint-disable no-console */
 const http = require('http')
+const crypto = require('crypto')
 const fs = require('fs')
 const fsp = require('fs/promises')
 const path = require('path')
@@ -9,6 +10,12 @@ const PORT = Number(process.env.PORT || 8080)
 const STATIC_DIR = process.env.STATIC_DIR || path.join(__dirname, '..', 'public')
 const STATS_FILE = process.env.STATS_FILE || '/data/stats.json'
 const MAX_BODY_BYTES = 256 * 1024
+
+const ADMIN_LOGIN = process.env.ADMIN_LOGIN || 'admin'
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || ''
+const ADMIN_TOKEN_TTL_MS = Number(process.env.ADMIN_TOKEN_TTL_MS || 12 * 60 * 60 * 1000)
+
+const adminTokens = new Map() // token -> expiresAt (ms)
 
 function defaultStore() {
   return { version: 2, users: {} }
@@ -119,6 +126,57 @@ function sendText(res, status, text) {
   res.end(text)
 }
 
+function safeEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false
+  const ab = Buffer.from(a)
+  const bb = Buffer.from(b)
+  if (ab.length !== bb.length) return false
+  try {
+    return crypto.timingSafeEqual(ab, bb)
+  } catch {
+    return false
+  }
+}
+
+function issueAdminToken(now = Date.now()) {
+  const token = crypto.randomBytes(24).toString('base64url')
+  const ttl = Number.isFinite(ADMIN_TOKEN_TTL_MS) ? ADMIN_TOKEN_TTL_MS : 12 * 60 * 60 * 1000
+  const expiresAt = now + ttl
+  adminTokens.set(token, expiresAt)
+  return { token, expiresAt }
+}
+
+function readBearerToken(req) {
+  const h = req.headers.authorization
+  if (typeof h !== 'string') return null
+  const m = /^Bearer\s+(.+)$/.exec(h)
+  if (!m) return null
+  return m[1] || null
+}
+
+function isAdminAuthed(req, now = Date.now()) {
+  const token = readBearerToken(req)
+  if (!token) return false
+  const exp = adminTokens.get(token)
+  if (!exp || exp <= now) {
+    adminTokens.delete(token)
+    return false
+  }
+  return true
+}
+
+function requireAdmin(req, res) {
+  if (!ADMIN_PASSWORD) {
+    sendText(res, 503, 'Admin is not configured')
+    return false
+  }
+  if (!isAdminAuthed(req)) {
+    sendText(res, 401, 'Unauthorized')
+    return false
+  }
+  return true
+}
+
 function guessContentType(filePath) {
   const ext = path.extname(filePath).toLowerCase()
   switch (ext) {
@@ -172,9 +230,44 @@ async function handleApi(req, res, url) {
     return sendJson(res, 200, { ok: true })
   }
 
-  if (req.method === 'GET' && url.pathname === '/api/stats') {
+  if (req.method === 'POST' && url.pathname === '/api/admin/login') {
+    if (!ADMIN_PASSWORD) return sendText(res, 503, 'Admin is not configured')
+
+    let body
+    try {
+      body = await readBodyJson(req)
+    } catch {
+      return sendText(res, 400, 'Invalid JSON')
+    }
+    if (!body || !isObject(body) || body.version !== 1) return sendText(res, 400, 'Bad request')
+    const login = typeof body.login === 'string' ? body.login.trim() : ''
+    const password = typeof body.password === 'string' ? body.password : ''
+    if (!safeEqual(login, ADMIN_LOGIN) || !safeEqual(password, ADMIN_PASSWORD)) return sendText(res, 401, 'Unauthorized')
+
+    const now = Date.now()
+    const { token, expiresAt } = issueAdminToken(now)
+    return sendJson(res, 200, { ok: true, token, expiresAt })
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/admin/verify') {
+    if (!ADMIN_PASSWORD) return sendText(res, 503, 'Admin is not configured')
+    if (!isAdminAuthed(req)) return sendJson(res, 200, { ok: false })
+    return sendJson(res, 200, { ok: true })
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/admin/stats') {
+    if (!requireAdmin(req, res)) return
     const store = await loadStore()
     return sendJson(res, 200, store)
+  }
+
+  // Public: returns stats for one nickname (so users can restore progress after localStorage resets).
+  if (req.method === 'GET' && url.pathname === '/api/stats/user') {
+    const nick = (url.searchParams.get('nick') || '').trim()
+    if (!nick) return sendText(res, 400, 'Missing nick')
+    const store = await loadStore()
+    const user = store.users && store.users[nick] ? store.users[nick] : null
+    return sendJson(res, 200, { ok: true, version: 1, nick, user })
   }
 
   if (req.method === 'POST' && url.pathname === '/api/stats/delta') {
@@ -196,6 +289,7 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === 'POST' && url.pathname === '/api/stats/users/delete') {
+    if (!requireAdmin(req, res)) return
     let body
     try {
       body = await readBodyJson(req)
