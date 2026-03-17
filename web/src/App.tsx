@@ -441,10 +441,6 @@ function App() {
             <div className="meta">Доступ закрыт</div>
           ) : (
             <>
-              <div className="meta">
-                Пароль можно переопределить через <code>VITE_ADMIN_PASSWORD</code> или в браузере (ключ{' '}
-                <code>{ADMIN_PASSWORD_KEY}</code>).
-              </div>
               <div className="adminUsers">
                 {(() => {
                   const store = loadStats()
