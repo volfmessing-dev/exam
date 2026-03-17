@@ -1,5 +1,5 @@
 import './App.css'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import dataset from './data/questions.json'
 
 type Question = {
@@ -22,7 +22,7 @@ const OPTION_LABELS = ['А', 'Б', 'В', 'Г', 'Д', 'Е']
 
 type BlockStat = { answered: number; correct: number }
 
-type UserStats = {
+type UserStatsV1 = {
   testsCompleted: number
   questionsAnswered: number
   questionsCorrect: number
@@ -30,12 +30,23 @@ type UserStats = {
   updatedAt: number
 }
 
-type StatsStore = {
+type StatsStoreV1 = {
   version: 1
+  users: Record<string, UserStatsV1>
+}
+
+type UserStats = UserStatsV1 & {
+  timeMsTotal: number
+  timeMsByBlock: Record<string, number>
+}
+
+type StatsStore = {
+  version: 2
   users: Record<string, UserStats>
 }
 
-const STATS_KEY = 'gosi_stats_v1'
+const STATS_KEY_V1 = 'gosi_stats_v1'
+const STATS_KEY_V2 = 'gosi_stats_v2'
 const NICKNAME_KEY = 'gosi_nickname'
 const ADMIN_PASSWORD_KEY = 'gosi_admin_password'
 
@@ -49,21 +60,32 @@ function safeJsonParse<T>(raw: string | null): T | null {
 }
 
 function loadStats(): StatsStore {
-  const parsed = safeJsonParse<StatsStore>(localStorage.getItem(STATS_KEY))
-  if (parsed && parsed.version === 1 && parsed.users) return parsed
-  return { version: 1, users: {} }
+  const parsedV2 = safeJsonParse<StatsStore>(localStorage.getItem(STATS_KEY_V2))
+  if (parsedV2 && parsedV2.version === 2 && parsedV2.users) return parsedV2
+
+  const parsedV1 = safeJsonParse<StatsStoreV1>(localStorage.getItem(STATS_KEY_V1))
+  if (parsedV1 && parsedV1.version === 1 && parsedV1.users) {
+    const migrated: StatsStore = {
+      version: 2,
+      users: Object.keys(parsedV1.users).reduce<Record<string, UserStats>>((acc, nick) => {
+        const st = parsedV1.users[nick]!
+        acc[nick] = { ...st, timeMsTotal: 0, timeMsByBlock: {} }
+        return acc
+      }, {}),
+    }
+    localStorage.setItem(STATS_KEY_V2, JSON.stringify(migrated))
+    return migrated
+  }
+
+  return { version: 2, users: {} }
 }
 
 function saveStats(store: StatsStore): void {
-  localStorage.setItem(STATS_KEY, JSON.stringify(store))
+  localStorage.setItem(STATS_KEY_V2, JSON.stringify(store))
 }
 
 function getAdminPassword(): string {
-  return (
-    import.meta.env.VITE_ADMIN_PASSWORD ||
-    localStorage.getItem(ADMIN_PASSWORD_KEY) ||
-    'BeeIT@2026'
-  )
+  return import.meta.env.VITE_ADMIN_PASSWORD || localStorage.getItem(ADMIN_PASSWORD_KEY) || ''
 }
 
 function upsertBlock(prev: Record<string, BlockStat>, block: string, ok: boolean): Record<string, BlockStat> {
@@ -80,6 +102,18 @@ function upsertBlock(prev: Record<string, BlockStat>, block: string, ok: boolean
 function percent(correct: number, total: number): string {
   if (!total) return '—'
   return `${Math.round((correct / total) * 100)}%`
+}
+
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000)
+  const s = totalSeconds % 60
+  const totalMinutes = Math.floor(totalSeconds / 60)
+  const m = totalMinutes % 60
+  const h = Math.floor(totalMinutes / 60)
+
+  const pad2 = (n: number) => String(n).padStart(2, '0')
+  if (h > 0) return `${h}:${pad2(m)}:${pad2(s)}`
+  return `${m}:${pad2(s)}`
 }
 
 function shuffleInPlace<T>(arr: T[], seed: number): void {
@@ -133,11 +167,45 @@ function App() {
   const [correct, setCorrect] = useState<number>(0)
   const [lastWasCorrect, setLastWasCorrect] = useState<boolean | null>(null)
 
+  const questionStartedAtRef = useRef<number | null>(null)
+  const timeCommittedMsRef = useRef<number>(0)
+  const blockTimeCommittedMsRef = useRef<Record<string, number>>({})
+
+  const [timerNow, setTimerNow] = useState<number>(() => Date.now())
+  const [questionStartedAt, setQuestionStartedAt] = useState<number | null>(null)
+  const [timeCommittedMs, setTimeCommittedMs] = useState<number>(0)
+  const [blockTimeCommittedMs, setBlockTimeCommittedMs] = useState<Record<string, number>>({})
+
   const current = queue.length ? quiz[queue[0]!] : undefined
 
   useEffect(() => {
     localStorage.setItem(NICKNAME_KEY, nickname)
   }, [nickname])
+
+  useEffect(() => {
+    if (screen !== 'quiz') return
+    const id = window.setInterval(() => setTimerNow(Date.now()), 250)
+    return () => window.clearInterval(id)
+  }, [screen])
+
+  const commitCurrentQuestionTime = (now = Date.now()) => {
+    if (!current) return
+    const startedAt = questionStartedAtRef.current
+    if (startedAt === null) return
+
+    const delta = Math.max(0, now - startedAt)
+    timeCommittedMsRef.current += delta
+    const discipline = current.discipline
+    blockTimeCommittedMsRef.current = {
+      ...blockTimeCommittedMsRef.current,
+      [discipline]: (blockTimeCommittedMsRef.current[discipline] ?? 0) + delta,
+    }
+
+    questionStartedAtRef.current = now
+    setQuestionStartedAt(now)
+    setTimeCommittedMs(timeCommittedMsRef.current)
+    setBlockTimeCommittedMs(blockTimeCommittedMsRef.current)
+  }
 
   const start = () => {
     const nick = nickname.trim()
@@ -148,6 +216,15 @@ function App() {
 
     const next = [...filtered]
     if (shuffle) shuffleInPlace(next, Date.now())
+
+    const now = Date.now()
+    questionStartedAtRef.current = now
+    timeCommittedMsRef.current = 0
+    blockTimeCommittedMsRef.current = {}
+    setTimerNow(now)
+    setQuestionStartedAt(now)
+    setTimeCommittedMs(0)
+    setBlockTimeCommittedMs({})
 
     setQuiz(next)
     setQueue(next.map((_, i) => i))
@@ -185,6 +262,7 @@ function App() {
 
   const skip = () => {
     if (reveal !== 'none') return
+    commitCurrentQuestionTime()
     setQueue((prev) => {
       if (prev.length <= 1) return prev
       return [...prev.slice(1), prev[0]!]
@@ -196,6 +274,8 @@ function App() {
   const next = () => {
     if (!current) return
     if (reveal === 'none') return
+
+    commitCurrentQuestionTime()
 
     let answeredNext = answered
     let correctNext = correct
@@ -220,6 +300,8 @@ function App() {
           questionsAnswered: 0,
           questionsCorrect: 0,
           blocks: {},
+          timeMsTotal: 0,
+          timeMsByBlock: {},
           updatedAt: Date.now(),
         }
 
@@ -237,6 +319,11 @@ function App() {
             }
             return acc
           }, { ...user.blocks }),
+          timeMsTotal: (user.timeMsTotal ?? 0) + timeCommittedMsRef.current,
+          timeMsByBlock: Object.keys(blockTimeCommittedMsRef.current).reduce<Record<string, number>>((acc, block) => {
+            acc[block] = (acc[block] ?? 0) + (blockTimeCommittedMsRef.current[block] ?? 0)
+            return acc
+          }, { ...(user.timeMsByBlock ?? {}) }),
           updatedAt: Date.now(),
         }
 
@@ -264,15 +351,30 @@ function App() {
     setRunBlocks({})
     setLastWasCorrect(null)
     setActiveNickname(null)
+
+    questionStartedAtRef.current = null
+    timeCommittedMsRef.current = 0
+    blockTimeCommittedMsRef.current = {}
+    setQuestionStartedAt(null)
+    setTimeCommittedMs(0)
+    setBlockTimeCommittedMs({})
   }
 
   const openAdmin = () => {
-    const pw = window.prompt('Пароль администратора')
-    if (pw === null) return
-    if (pw !== getAdminPassword()) {
-      window.alert('Неверный пароль')
+    const configured = getAdminPassword()
+    if (!configured) {
+      const nextPw = window.prompt('Админ-пароль не настроен. Задайте новый (сохранится в этом браузере)')
+      if (!nextPw) return
+      localStorage.setItem(ADMIN_PASSWORD_KEY, nextPw)
+      setAdminAuthed(true)
+      setScreen('admin')
       return
     }
+
+    const pw = window.prompt('Пароль администратора')
+    if (pw === null) return
+    if (pw !== configured) return void window.alert('Неверный пароль')
+
     setAdminAuthed(true)
     setScreen('admin')
   }
@@ -348,7 +450,15 @@ function App() {
               </div>
             </div>
             <div className="score">
-              Правильно: <b>{correct}</b> / {answered || '—'}
+              <div>
+                Правильно: <b>{correct}</b> / {answered || '—'}
+              </div>
+              <div>
+                Время: <b>{formatDuration(timeCommittedMs + Math.max(0, questionStartedAt ? timerNow - questionStartedAt : 0))}</b>
+              </div>
+              <div>
+                Блок: <b>{formatDuration((blockTimeCommittedMs[current.discipline] ?? 0) + Math.max(0, questionStartedAt ? timerNow - questionStartedAt : 0))}</b>
+              </div>
             </div>
           </div>
 
@@ -421,6 +531,23 @@ function App() {
               Точность: {quiz.length ? Math.round((correct / quiz.length) * 100) : 0}% · Вопросов: {quiz.length}
             </div>
           </div>
+          <div className="meta">
+            Время: <b>{formatDuration(timeCommittedMs)}</b>
+            {' · '}
+            Среднее: <b>{answered ? formatDuration(Math.round(timeCommittedMs / answered)) : '—'}</b> / вопрос
+          </div>
+          {!!Object.keys(blockTimeCommittedMs).length && (
+            <div className="adminBlocks">
+              {Object.entries(blockTimeCommittedMs)
+                .sort((a, b) => b[1] - a[1])
+                .map(([block, ms]) => (
+                  <div key={block} className="adminBlock">
+                    <span className="adminBlockName">{block}</span>
+                    <span className="adminBlockKpi">{formatDuration(ms)}</span>
+                  </div>
+                ))}
+            </div>
+          )}
           {!!activeNickname && (
             <div className="meta">
               Сохранено для: <b>{activeNickname}</b>
@@ -460,11 +587,16 @@ function App() {
                         <span className="adminKpi">
                           Точность: <b>{percent(st.questionsCorrect, st.questionsAnswered)}</b>
                         </span>
+                        <span className="adminKpi">
+                          Время: <b>{formatDuration(st.timeMsTotal ?? 0)}</b>
+                        </span>
                       </summary>
                       <div className="adminBody">
                         <div className="meta">
                           Вопросов отвечено: <b>{st.questionsAnswered}</b> · Правильно:{' '}
                           <b>{st.questionsCorrect}</b>
+                          {' · '}
+                          Среднее: <b>{st.questionsAnswered ? formatDuration(Math.round((st.timeMsTotal ?? 0) / st.questionsAnswered)) : '—'}</b> / вопрос
                         </div>
                         <div className="adminBlocks">
                           {Object.entries(st.blocks)
@@ -473,7 +605,7 @@ function App() {
                               <div key={block} className="adminBlock">
                                 <span className="adminBlockName">{block}</span>
                                 <span className="adminBlockKpi">
-                                  {bs.correct}/{bs.answered} ({percent(bs.correct, bs.answered)})
+                                  {bs.correct}/{bs.answered} ({percent(bs.correct, bs.answered)}) · {formatDuration((st.timeMsByBlock ?? {})[block] ?? 0)}
                                 </span>
                               </div>
                             ))}
