@@ -124,16 +124,16 @@ function App() {
   const [adminAuthed, setAdminAuthed] = useState<boolean>(false)
 
   const [quiz, setQuiz] = useState<Question[]>([])
-  const [idx, setIdx] = useState<number>(0)
+  const [queue, setQueue] = useState<number[]>([])
   const [picked, setPicked] = useState<number[]>([])
-  const [reveal, setReveal] = useState<'none' | 'checked' | 'shown'>('none')
+  const [reveal, setReveal] = useState<'none' | 'checked'>('none')
   const [runBlocks, setRunBlocks] = useState<Record<string, BlockStat>>({})
 
   const [answered, setAnswered] = useState<number>(0)
   const [correct, setCorrect] = useState<number>(0)
   const [lastWasCorrect, setLastWasCorrect] = useState<boolean | null>(null)
 
-  const current = quiz[idx]
+  const current = queue.length ? quiz[queue[0]!] : undefined
 
   useEffect(() => {
     localStorage.setItem(NICKNAME_KEY, nickname)
@@ -150,7 +150,7 @@ function App() {
     if (shuffle) shuffleInPlace(next, Date.now())
 
     setQuiz(next)
-    setIdx(0)
+    setQueue(next.map((_, i) => i))
     setPicked([])
     setReveal('none')
     setAnswered(0)
@@ -183,9 +183,13 @@ function App() {
     setLastWasCorrect(ok)
   }
 
-  const showAnswer = () => {
-    if (!current) return
-    setReveal('shown')
+  const skip = () => {
+    if (reveal !== 'none') return
+    setQueue((prev) => {
+      if (prev.length <= 1) return prev
+      return [...prev.slice(1), prev[0]!]
+    })
+    setPicked([])
     setLastWasCorrect(null)
   }
 
@@ -206,8 +210,8 @@ function App() {
       setRunBlocks(runBlocksNext)
     }
 
-    const nextIdx = idx + 1
-    if (nextIdx >= quiz.length) {
+    const nextQueue = queue.slice(1)
+    if (nextQueue.length === 0) {
       const nick = activeNickname
       if (nick) {
         const store = loadStats()
@@ -238,11 +242,12 @@ function App() {
 
         saveStats({ ...store, users: { ...store.users, [nick]: nextUser } })
       }
+      setQueue([])
       setScreen('result')
       return
     }
 
-    setIdx(nextIdx)
+    setQueue(nextQueue)
     setPicked([])
     setReveal('none')
     setLastWasCorrect(null)
@@ -251,7 +256,7 @@ function App() {
   const reset = () => {
     setScreen('setup')
     setQuiz([])
-    setIdx(0)
+    setQueue([])
     setPicked([])
     setReveal('none')
     setAnswered(0)
@@ -333,12 +338,12 @@ function App() {
           <div className="topline">
             <div className="progress">
               <div className="progressText">
-                Вопрос {idx + 1} из {quiz.length}
+                Вопрос {answered + 1} из {quiz.length}
               </div>
               <div className="bar">
                 <div
                   className="barFill"
-                  style={{ width: `${((idx + 1) / quiz.length) * 100}%` }}
+                  style={{ width: `${(quiz.length ? answered / quiz.length : 0) * 100}%` }}
                 />
               </div>
             </div>
@@ -381,8 +386,8 @@ function App() {
                 <button className="primary" onClick={check} disabled={picked.length === 0}>
                   Проверить
                 </button>
-                <button className="ghost" onClick={showAnswer}>
-                  Показать ответ
+                <button className="ghost" onClick={skip} disabled={queue.length <= 1}>
+                  Пропустить
                 </button>
               </>
             )}
@@ -393,15 +398,11 @@ function App() {
                     {lastWasCorrect ? 'Верно' : 'Неверно'}
                   </div>
                 )}
-                {reveal === 'shown' && <div className="verdict ok">Ответ показан</div>}
                 <button className="primary" onClick={next}>
                   Дальше
                 </button>
               </>
             )}
-            <button className="ghost" onClick={reset}>
-              Сброс
-            </button>
           </div>
         </section>
       )}
@@ -411,10 +412,10 @@ function App() {
           <h1>Результат</h1>
           <div className="resultCard">
             <div className="big">
-              {correct} / {answered || 0}
+              {correct} / {quiz.length}
             </div>
             <div className="small">
-              Точность: {answered ? Math.round((correct / answered) * 100) : 0}% · Вопросов: {quiz.length}
+              Точность: {quiz.length ? Math.round((correct / quiz.length) * 100) : 0}% · Вопросов: {quiz.length}
             </div>
           </div>
           {!!activeNickname && (
