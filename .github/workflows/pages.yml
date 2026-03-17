@@ -35,6 +35,8 @@ jobs:
         run: npm run build -- --base=/${{ github.event.repository.name }}/
 
       - uses: actions/configure-pages@v5
+        with:
+          enablement: true
 
       - uses: actions/upload-pages-artifact@v3
         with:
@@ -49,4 +51,3 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
-
