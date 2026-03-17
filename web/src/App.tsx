@@ -275,8 +275,8 @@ function App() {
   return (
     <div className="app">
       <header className="header">
-        <div className="brand">Госы</div>
-        <div className="sub">Тренажер тестовых вопросов</div>
+        <div className="brand">Test just for fun</div>
+        <div className="sub">Test just for fun</div>
       </header>
 
       {screen === 'setup' && (
