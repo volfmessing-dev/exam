@@ -219,6 +219,16 @@ input {
   color: rgba(20, 120, 70, 0.92);
 }
 
+.option.missed {
+  border-color: rgba(255, 153, 0, 0.34);
+  background: rgba(255, 246, 229, 0.92);
+}
+
+.option.missed .optLabel {
+  background: rgba(255, 153, 0, 0.14);
+  color: rgba(180, 105, 0, 0.95);
+}
+
 .option.picked {
   border-color: rgba(62, 139, 255, 0.45);
   background: rgba(236, 245, 255, 0.92);
@@ -287,6 +297,11 @@ button:disabled {
 .verdict.bad {
   border-color: rgba(170, 45, 45, 0.25);
   background: rgba(255, 236, 236, 0.75);
+}
+
+.verdict.warn {
+  border-color: rgba(255, 153, 0, 0.3);
+  background: rgba(255, 246, 229, 0.75);
 }
 
 .resultCard {

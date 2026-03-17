@@ -134,14 +134,14 @@ function shuffleInPlace<T>(arr: T[], seed: number): void {
   }
 }
 
-function sameSet(a: number[], b: number[]): boolean {
-  if (a.length !== b.length) return false
-  const aa = [...a].sort((x, y) => x - y)
-  const bb = [...b].sort((x, y) => x - y)
-  for (let i = 0; i < aa.length; i++) {
-    if (aa[i] !== bb[i]) return false
-  }
-  return true
+function evaluateAnswer(picked: number[], answer: number[]): { ok: boolean; partial: boolean } {
+  const pickedSet = new Set(picked)
+  const answerSet = new Set(answer)
+  const hasWrong = picked.some((i) => !answerSet.has(i))
+  const missingAny = answer.some((i) => !pickedSet.has(i))
+  const ok = !hasWrong && !missingAny && pickedSet.size === answerSet.size
+  const partial = !ok && !hasWrong && picked.length > 0 && missingAny
+  return { ok, partial }
 }
 
 type Screen = 'setup' | 'quiz' | 'result'
@@ -159,9 +159,15 @@ type RunState = {
   answered: number
   correct: number
   lastWasCorrect: boolean | null
+  lastWasPartial: boolean
   runBlocks: Record<string, BlockStat>
   timeCommittedMs: number
   blockTimeCommittedMs: Record<string, number>
+  syncedAnswered: number
+  syncedCorrect: number
+  syncedRunBlocks: Record<string, BlockStat>
+  syncedTimeCommittedMs: number
+  syncedBlockTimeCommittedMs: Record<string, number>
   savedAt: number
 }
 
@@ -187,10 +193,17 @@ function App() {
   const [answered, setAnswered] = useState<number>(0)
   const [correct, setCorrect] = useState<number>(0)
   const [lastWasCorrect, setLastWasCorrect] = useState<boolean | null>(null)
+  const [lastWasPartial, setLastWasPartial] = useState<boolean>(false)
 
   const questionStartedAtRef = useRef<number | null>(null)
   const timeCommittedMsRef = useRef<number>(0)
   const blockTimeCommittedMsRef = useRef<Record<string, number>>({})
+
+  const statsSyncedAnsweredRef = useRef<number>(0)
+  const statsSyncedCorrectRef = useRef<number>(0)
+  const statsSyncedRunBlocksRef = useRef<Record<string, BlockStat>>({})
+  const statsSyncedTimeCommittedMsRef = useRef<number>(0)
+  const statsSyncedBlockTimeCommittedMsRef = useRef<Record<string, number>>({})
 
   const [timerNow, setTimerNow] = useState<number>(() => Date.now())
   const [questionStartedAt, setQuestionStartedAt] = useState<number | null>(null)
@@ -204,33 +217,45 @@ function App() {
   }, [nickname])
 
   useEffect(() => {
-    const snapshot = safeJsonParse<RunState>(sessionStorage.getItem(RUN_KEY_V1))
-    if (!snapshot || snapshot.version !== 1 || snapshot.screen !== 'quiz') return
+    const snapshotRaw = safeJsonParse<unknown>(sessionStorage.getItem(RUN_KEY_V1))
+    if (!snapshotRaw || typeof snapshotRaw !== 'object') return
+    const snapshot = snapshotRaw as Partial<RunState>
+    if (snapshot.version !== 1 || snapshot.screen !== 'quiz') return
 
-    if (!Array.isArray(snapshot.quizSourceIndices) || snapshot.quizSourceIndices.length === 0) return
-    if (!Array.isArray(snapshot.queue) || snapshot.queue.length === 0) return
-    if (!snapshot.quizSourceIndices.every((i) => Number.isInteger(i) && i >= 0 && i < data.questions.length)) return
-    if (!snapshot.queue.every((q) => Number.isInteger(q) && q >= 0 && q < snapshot.quizSourceIndices.length)) return
+    const quizSourceIndices = snapshot.quizSourceIndices
+    const queue = snapshot.queue
+    if (!Array.isArray(quizSourceIndices) || quizSourceIndices.length === 0) return
+    if (!Array.isArray(queue) || queue.length === 0) return
+    if (!quizSourceIndices.every((i) => Number.isInteger(i) && i >= 0 && i < data.questions.length)) return
+    if (!queue.every((q) => Number.isInteger(q) && q >= 0 && q < quizSourceIndices.length)) return
 
     const now = Date.now()
-    const restoredQuiz = snapshot.quizSourceIndices.map((i) => data.questions[i]!)
+    const restoredQuiz = quizSourceIndices.map((i) => data.questions[i]!)
 
-    setDiscipline(snapshot.discipline)
-    setShuffle(snapshot.shuffle)
-    setActiveNickname(snapshot.activeNickname)
-    setQuizSourceIndices(snapshot.quizSourceIndices)
+    setDiscipline(snapshot.discipline ?? '__all__')
+    setShuffle(!!snapshot.shuffle)
+    setActiveNickname(snapshot.activeNickname ?? null)
+    setQuizSourceIndices(quizSourceIndices)
     setQuiz(restoredQuiz)
-    setQueue(snapshot.queue)
+    setQueue(queue)
     setPicked(snapshot.picked ?? [])
     setReveal(snapshot.reveal ?? 'none')
     setAnswered(snapshot.answered ?? 0)
     setCorrect(snapshot.correct ?? 0)
     setLastWasCorrect(snapshot.lastWasCorrect ?? null)
+    setLastWasPartial(snapshot.lastWasPartial ?? false)
     setRunBlocks(snapshot.runBlocks ?? {})
 
     questionStartedAtRef.current = now
     timeCommittedMsRef.current = snapshot.timeCommittedMs ?? 0
     blockTimeCommittedMsRef.current = snapshot.blockTimeCommittedMs ?? {}
+
+    statsSyncedAnsweredRef.current = snapshot.syncedAnswered ?? 0
+    statsSyncedCorrectRef.current = snapshot.syncedCorrect ?? 0
+    statsSyncedRunBlocksRef.current = snapshot.syncedRunBlocks ?? {}
+    statsSyncedTimeCommittedMsRef.current = snapshot.syncedTimeCommittedMs ?? 0
+    statsSyncedBlockTimeCommittedMsRef.current = snapshot.syncedBlockTimeCommittedMs ?? {}
+
     setTimerNow(now)
     setQuestionStartedAt(now)
     setTimeCommittedMs(timeCommittedMsRef.current)
@@ -271,9 +296,15 @@ function App() {
       answered,
       correct,
       lastWasCorrect,
+      lastWasPartial,
       runBlocks,
       timeCommittedMs: timeTotal,
       blockTimeCommittedMs: byBlock,
+      syncedAnswered: statsSyncedAnsweredRef.current,
+      syncedCorrect: statsSyncedCorrectRef.current,
+      syncedRunBlocks: statsSyncedRunBlocksRef.current,
+      syncedTimeCommittedMs: statsSyncedTimeCommittedMsRef.current,
+      syncedBlockTimeCommittedMs: statsSyncedBlockTimeCommittedMsRef.current,
       savedAt: now,
     }
   }
@@ -288,11 +319,110 @@ function App() {
     sessionStorage.removeItem(RUN_KEY_V1)
   }
 
+  const ensureUserInStats = (nick: string, now = Date.now()) => {
+    const store = loadStats()
+    const existing = store.users[nick]
+    if (existing) return
+
+    const nextUser: UserStats = {
+      testsCompleted: 0,
+      questionsAnswered: 0,
+      questionsCorrect: 0,
+      blocks: {},
+      timeMsTotal: 0,
+      timeMsByBlock: {},
+      updatedAt: now,
+    }
+    saveStats({ ...store, users: { ...store.users, [nick]: nextUser } })
+  }
+
+  const syncRunToStats = (now = Date.now(), overrides?: { answered: number; correct: number; runBlocks: Record<string, BlockStat> }) => {
+    const nick = activeNickname
+    if (!nick) return
+
+    const answeredTotal = overrides?.answered ?? answered
+    const correctTotal = overrides?.correct ?? correct
+    const runBlocksTotal = overrides?.runBlocks ?? runBlocks
+
+    const deltaAnswered = Math.max(0, answeredTotal - statsSyncedAnsweredRef.current)
+    const deltaCorrect = Math.max(0, correctTotal - statsSyncedCorrectRef.current)
+    const deltaTime = Math.max(0, timeCommittedMsRef.current - statsSyncedTimeCommittedMsRef.current)
+
+    const deltaRunBlocks: Record<string, BlockStat> = Object.keys(runBlocksTotal).reduce<Record<string, BlockStat>>((acc, block) => {
+      const current = runBlocksTotal[block]!
+      const prev = statsSyncedRunBlocksRef.current[block] ?? { answered: 0, correct: 0 }
+      const answeredDelta = Math.max(0, current.answered - prev.answered)
+      const correctDelta = Math.max(0, current.correct - prev.correct)
+      if (answeredDelta || correctDelta) acc[block] = { answered: answeredDelta, correct: correctDelta }
+      return acc
+    }, {})
+
+    const deltaBlockTime: Record<string, number> = Object.keys(blockTimeCommittedMsRef.current).reduce<Record<string, number>>((acc, block) => {
+      const current = blockTimeCommittedMsRef.current[block] ?? 0
+      const prev = statsSyncedBlockTimeCommittedMsRef.current[block] ?? 0
+      const d = Math.max(0, current - prev)
+      if (d) acc[block] = d
+      return acc
+    }, {})
+
+    const hasAnyDelta =
+      deltaAnswered > 0 ||
+      deltaCorrect > 0 ||
+      deltaTime > 0 ||
+      Object.keys(deltaRunBlocks).length > 0 ||
+      Object.keys(deltaBlockTime).length > 0
+
+    if (!hasAnyDelta) return
+
+    const store = loadStats()
+    const user = store.users[nick] ?? {
+      testsCompleted: 0,
+      questionsAnswered: 0,
+      questionsCorrect: 0,
+      blocks: {},
+      timeMsTotal: 0,
+      timeMsByBlock: {},
+      updatedAt: now,
+    }
+
+    const nextBlocks = Object.keys(deltaRunBlocks).reduce<Record<string, BlockStat>>((acc, block) => {
+      const prev = acc[block] ?? { answered: 0, correct: 0 }
+      const add = deltaRunBlocks[block]!
+      acc[block] = { answered: prev.answered + add.answered, correct: prev.correct + add.correct }
+      return acc
+    }, { ...user.blocks })
+
+    const nextTimeByBlock = Object.keys(deltaBlockTime).reduce<Record<string, number>>((acc, block) => {
+      acc[block] = (acc[block] ?? 0) + (deltaBlockTime[block] ?? 0)
+      return acc
+    }, { ...(user.timeMsByBlock ?? {}) })
+
+    const nextUser: UserStats = {
+      ...user,
+      questionsAnswered: user.questionsAnswered + deltaAnswered,
+      questionsCorrect: user.questionsCorrect + deltaCorrect,
+      blocks: nextBlocks,
+      timeMsTotal: (user.timeMsTotal ?? 0) + deltaTime,
+      timeMsByBlock: nextTimeByBlock,
+      updatedAt: now,
+    }
+
+    saveStats({ ...store, users: { ...store.users, [nick]: nextUser } })
+
+    statsSyncedAnsweredRef.current = answeredTotal
+    statsSyncedCorrectRef.current = correctTotal
+    statsSyncedRunBlocksRef.current = runBlocksTotal
+    statsSyncedTimeCommittedMsRef.current = timeCommittedMsRef.current
+    statsSyncedBlockTimeCommittedMsRef.current = blockTimeCommittedMsRef.current
+
+    persistRunSnapshot(now)
+  }
+
   useEffect(() => {
     if (screen !== 'quiz') return
     persistRunSnapshot()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [screen, discipline, shuffle, activeNickname, quizSourceIndices, queue, picked, reveal, answered, correct, lastWasCorrect, runBlocks])
+  }, [screen, discipline, shuffle, activeNickname, quizSourceIndices, queue, picked, reveal, answered, correct, lastWasCorrect, lastWasPartial, runBlocks])
 
   useEffect(() => {
     const onVisibility = () => {
@@ -309,7 +439,7 @@ function App() {
 
   useEffect(() => {
     if (screen !== 'quiz') return
-    const id = window.setInterval(() => persistRunSnapshot(), 5000)
+    const id = window.setInterval(() => persistRunSnapshot(), 1000)
     return () => window.clearInterval(id)
   }, [screen])
 
@@ -361,10 +491,19 @@ function App() {
     questionStartedAtRef.current = now
     timeCommittedMsRef.current = 0
     blockTimeCommittedMsRef.current = {}
+
+    statsSyncedAnsweredRef.current = 0
+    statsSyncedCorrectRef.current = 0
+    statsSyncedRunBlocksRef.current = {}
+    statsSyncedTimeCommittedMsRef.current = 0
+    statsSyncedBlockTimeCommittedMsRef.current = {}
+
     setTimerNow(now)
     setQuestionStartedAt(now)
     setTimeCommittedMs(0)
     setBlockTimeCommittedMs({})
+
+    if (nick) ensureUserInStats(nick, now)
 
     setQuizSourceIndices(nextIndices)
     setQuiz(next)
@@ -375,6 +514,7 @@ function App() {
     setCorrect(0)
     setRunBlocks({})
     setLastWasCorrect(null)
+    setLastWasPartial(false)
     setActiveNickname(nick ? nick : null)
     setScreen('quiz')
   }
@@ -396,27 +536,32 @@ function App() {
 
   const check = () => {
     if (!current) return
-    const ok = sameSet(picked, current.answer)
+    const { ok, partial } = evaluateAnswer(picked, current.answer)
     setReveal('checked')
     setLastWasCorrect(ok)
+    setLastWasPartial(partial)
   }
 
   const skip = () => {
     if (reveal !== 'none') return
-    commitCurrentQuestionTime()
+    const now = Date.now()
+    commitCurrentQuestionTime(now)
+    syncRunToStats(now)
     setQueue((prev) => {
       if (prev.length <= 1) return prev
       return [...prev.slice(1), prev[0]!]
     })
     setPicked([])
     setLastWasCorrect(null)
+    setLastWasPartial(false)
   }
 
   const next = () => {
     if (!current) return
     if (reveal === 'none') return
 
-    commitCurrentQuestionTime()
+    const now = Date.now()
+    commitCurrentQuestionTime(now)
 
     let answeredNext = answered
     let correctNext = correct
@@ -433,56 +578,41 @@ function App() {
 
     const nextQueue = queue.slice(1)
     if (nextQueue.length === 0) {
+      syncRunToStats(now, { answered: answeredNext, correct: correctNext, runBlocks: runBlocksNext })
       clearRunSnapshot()
       const nick = activeNickname
       if (nick) {
         const store = loadStats()
-        const user = store.users[nick] ?? {
-          testsCompleted: 0,
-          questionsAnswered: 0,
-          questionsCorrect: 0,
-          blocks: {},
-          timeMsTotal: 0,
-          timeMsByBlock: {},
-          updatedAt: Date.now(),
+        const user = store.users[nick]
+        if (user) {
+          saveStats({
+            ...store,
+            users: {
+              ...store.users,
+              [nick]: { ...user, testsCompleted: user.testsCompleted + 1, updatedAt: now },
+            },
+          })
         }
-
-        const nextUser: UserStats = {
-          ...user,
-          testsCompleted: user.testsCompleted + 1,
-          questionsAnswered: user.questionsAnswered + answeredNext,
-          questionsCorrect: user.questionsCorrect + correctNext,
-          blocks: Object.keys(runBlocksNext).reduce<Record<string, BlockStat>>((acc, block) => {
-            const prev = user.blocks[block] ?? { answered: 0, correct: 0 }
-            const add = runBlocksNext[block]!
-            acc[block] = {
-              answered: prev.answered + add.answered,
-              correct: prev.correct + add.correct,
-            }
-            return acc
-          }, { ...user.blocks }),
-          timeMsTotal: (user.timeMsTotal ?? 0) + timeCommittedMsRef.current,
-          timeMsByBlock: Object.keys(blockTimeCommittedMsRef.current).reduce<Record<string, number>>((acc, block) => {
-            acc[block] = (acc[block] ?? 0) + (blockTimeCommittedMsRef.current[block] ?? 0)
-            return acc
-          }, { ...(user.timeMsByBlock ?? {}) }),
-          updatedAt: Date.now(),
-        }
-
-        saveStats({ ...store, users: { ...store.users, [nick]: nextUser } })
       }
       setQueue([])
       setScreen('result')
       return
     }
 
+    syncRunToStats(now, { answered: answeredNext, correct: correctNext, runBlocks: runBlocksNext })
     setQueue(nextQueue)
     setPicked([])
     setReveal('none')
     setLastWasCorrect(null)
+    setLastWasPartial(false)
   }
 
   const reset = () => {
+    if (screen === 'quiz') {
+      const now = Date.now()
+      commitCurrentQuestionTime(now)
+      syncRunToStats(now)
+    }
     setScreen('setup')
     clearRunSnapshot()
     setQuiz([])
@@ -494,6 +624,7 @@ function App() {
     setCorrect(0)
     setRunBlocks({})
     setLastWasCorrect(null)
+    setLastWasPartial(false)
     setActiveNickname(null)
 
     questionStartedAtRef.current = null
@@ -608,13 +739,22 @@ function App() {
 
           <div className="discipline">{current.discipline}</div>
           <h2 className="question">{current.question}</h2>
-          {current.multi && <div className="hint">Можно выбрать несколько вариантов</div>}
+          {current.multi && <div className="hint">Выберите все правильные варианты</div>}
 
           <div className="options" role="group" aria-label="Варианты ответа">
             {current.options.map((opt, optionIndex) => {
               const isPicked = picked.includes(optionIndex)
               const isCorrect = current.answer.includes(optionIndex)
-              const state = reveal === 'none' ? '' : isCorrect ? 'correct' : isPicked ? 'wrong' : ''
+              const state =
+                reveal === 'none'
+                  ? ''
+                  : isCorrect
+                      ? current.multi && !isPicked
+                          ? 'missed'
+                          : 'correct'
+                      : isPicked
+                          ? 'wrong'
+                          : ''
               const pickedCls = reveal === 'none' && isPicked ? 'picked' : ''
 
               return (
@@ -648,8 +788,8 @@ function App() {
             {reveal !== 'none' && (
               <>
                 {reveal === 'checked' && lastWasCorrect !== null && (
-                  <div className={`verdict ${lastWasCorrect ? 'ok' : 'bad'}`}>
-                    {lastWasCorrect ? 'Верно' : 'Неверно'}
+                  <div className={`verdict ${lastWasCorrect ? 'ok' : lastWasPartial ? 'warn' : 'bad'}`}>
+                    {lastWasCorrect ? 'Верно' : lastWasPartial ? 'Не все варианты выбраны' : 'Неверно'}
                   </div>
                 )}
                 <button className="primary" onClick={next}>
