@@ -32,4 +32,3 @@ docker compose up --build
 
 - GitHub Pages: `.github/workflows/pages.yml`
 - Docker image в GHCR: `.github/workflows/ghcr.yml`
-

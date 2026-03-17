@@ -118,6 +118,20 @@ select {
   font-size: 13px;
 }
 
+input {
+  border-radius: 12px;
+  border: 1px solid rgba(20, 20, 25, 0.14);
+  background: rgba(255, 255, 255, 0.9);
+  padding: 10px 12px;
+  min-width: min(280px, 60vw);
+  font-size: 13px;
+}
+
+.help {
+  font-size: 11px;
+  color: rgba(20, 20, 25, 0.6);
+}
+
 .check {
   flex-direction: row;
   align-items: center;
@@ -187,6 +201,16 @@ select {
 .option.correct .optLabel {
   background: rgba(20, 120, 70, 0.12);
   color: rgba(20, 120, 70, 0.92);
+}
+
+.option.picked {
+  border-color: rgba(62, 139, 255, 0.45);
+  background: rgba(236, 245, 255, 0.92);
+}
+
+.option.picked .optLabel {
+  background: rgba(62, 139, 255, 0.14);
+  color: rgba(38, 108, 220, 0.95);
 }
 
 .option.wrong {
@@ -274,6 +298,81 @@ button:disabled {
   margin: 4px 2px 0;
   color: rgba(20, 20, 25, 0.55);
   font-size: 12px;
+}
+
+.linkLike {
+  border: none;
+  padding: 0;
+  background: transparent;
+  color: rgba(20, 20, 25, 0.62);
+  text-decoration: underline;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.linkLike:hover {
+  color: rgba(20, 20, 25, 0.85);
+}
+
+.adminUsers {
+  margin-top: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.adminUser {
+  border-radius: 14px;
+  border: 1px solid rgba(20, 20, 25, 0.12);
+  background: rgba(255, 255, 255, 0.85);
+  padding: 10px 12px;
+}
+
+.adminUser summary {
+  cursor: pointer;
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  flex-wrap: wrap;
+  list-style: none;
+}
+
+.adminUser summary::-webkit-details-marker {
+  display: none;
+}
+
+.adminNick {
+  font-weight: 800;
+}
+
+.adminKpi {
+  font-size: 12px;
+  color: rgba(20, 20, 25, 0.68);
+}
+
+.adminBody {
+  margin-top: 10px;
+}
+
+.adminBlocks {
+  margin-top: 10px;
+  display: grid;
+  gap: 6px;
+}
+
+.adminBlock {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.adminBlockName {
+  color: rgba(20, 20, 25, 0.8);
+}
+
+.adminBlockKpi {
+  color: rgba(20, 20, 25, 0.65);
+  white-space: nowrap;
 }
 
 .footer code {

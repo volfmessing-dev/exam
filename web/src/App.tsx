@@ -1,5 +1,5 @@
 import './App.css'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import dataset from './data/questions.json'
 
 type Question = {
@@ -19,6 +19,68 @@ type Dataset = {
 const data = dataset as Dataset
 
 const OPTION_LABELS = ['А', 'Б', 'В', 'Г', 'Д', 'Е']
+
+type BlockStat = { answered: number; correct: number }
+
+type UserStats = {
+  testsCompleted: number
+  questionsAnswered: number
+  questionsCorrect: number
+  blocks: Record<string, BlockStat>
+  updatedAt: number
+}
+
+type StatsStore = {
+  version: 1
+  users: Record<string, UserStats>
+}
+
+const STATS_KEY = 'gosi_stats_v1'
+const NICKNAME_KEY = 'gosi_nickname'
+const ADMIN_PASSWORD_KEY = 'gosi_admin_password'
+
+function safeJsonParse<T>(raw: string | null): T | null {
+  if (!raw) return null
+  try {
+    return JSON.parse(raw) as T
+  } catch {
+    return null
+  }
+}
+
+function loadStats(): StatsStore {
+  const parsed = safeJsonParse<StatsStore>(localStorage.getItem(STATS_KEY))
+  if (parsed && parsed.version === 1 && parsed.users) return parsed
+  return { version: 1, users: {} }
+}
+
+function saveStats(store: StatsStore): void {
+  localStorage.setItem(STATS_KEY, JSON.stringify(store))
+}
+
+function getAdminPassword(): string {
+  return (
+    import.meta.env.VITE_ADMIN_PASSWORD ||
+    localStorage.getItem(ADMIN_PASSWORD_KEY) ||
+    'BeeIT@2026'
+  )
+}
+
+function upsertBlock(prev: Record<string, BlockStat>, block: string, ok: boolean): Record<string, BlockStat> {
+  const current = prev[block] ?? { answered: 0, correct: 0 }
+  return {
+    ...prev,
+    [block]: {
+      answered: current.answered + 1,
+      correct: current.correct + (ok ? 1 : 0),
+    },
+  }
+}
+
+function percent(correct: number, total: number): string {
+  if (!total) return '—'
+  return `${Math.round((correct / total) * 100)}%`
+}
 
 function shuffleInPlace<T>(arr: T[], seed: number): void {
   // Fisher-Yates; seed makes shuffling stable per run (no crypto).
@@ -54,14 +116,18 @@ function App() {
     return Array.from(new Set(data.questions.map((q) => q.discipline))).sort()
   }, [])
 
-  const [screen, setScreen] = useState<Screen>('setup')
+  const [screen, setScreen] = useState<Screen | 'admin'>('setup')
   const [discipline, setDiscipline] = useState<string>('__all__')
   const [shuffle, setShuffle] = useState<boolean>(true)
+  const [nickname, setNickname] = useState<string>(() => localStorage.getItem(NICKNAME_KEY) ?? '')
+  const [activeNickname, setActiveNickname] = useState<string | null>(null)
+  const [adminAuthed, setAdminAuthed] = useState<boolean>(false)
 
   const [quiz, setQuiz] = useState<Question[]>([])
   const [idx, setIdx] = useState<number>(0)
   const [picked, setPicked] = useState<number[]>([])
   const [reveal, setReveal] = useState<'none' | 'checked' | 'shown'>('none')
+  const [runBlocks, setRunBlocks] = useState<Record<string, BlockStat>>({})
 
   const [answered, setAnswered] = useState<number>(0)
   const [correct, setCorrect] = useState<number>(0)
@@ -69,7 +135,12 @@ function App() {
 
   const current = quiz[idx]
 
+  useEffect(() => {
+    localStorage.setItem(NICKNAME_KEY, nickname)
+  }, [nickname])
+
   const start = () => {
+    const nick = nickname.trim()
     const filtered =
       discipline === '__all__'
         ? data.questions
@@ -84,7 +155,9 @@ function App() {
     setReveal('none')
     setAnswered(0)
     setCorrect(0)
+    setRunBlocks({})
     setLastWasCorrect(null)
+    setActiveNickname(nick ? nick : null)
     setScreen('quiz')
   }
 
@@ -120,13 +193,51 @@ function App() {
     if (!current) return
     if (reveal === 'none') return
 
+    let answeredNext = answered
+    let correctNext = correct
+    let runBlocksNext = runBlocks
+
     if (reveal === 'checked' && lastWasCorrect !== null) {
-      setAnswered((x) => x + 1)
-      if (lastWasCorrect) setCorrect((x) => x + 1)
+      answeredNext = answered + 1
+      correctNext = correct + (lastWasCorrect ? 1 : 0)
+      runBlocksNext = upsertBlock(runBlocks, current.discipline, lastWasCorrect)
+      setAnswered(answeredNext)
+      setCorrect(correctNext)
+      setRunBlocks(runBlocksNext)
     }
 
     const nextIdx = idx + 1
     if (nextIdx >= quiz.length) {
+      const nick = activeNickname
+      if (nick) {
+        const store = loadStats()
+        const user = store.users[nick] ?? {
+          testsCompleted: 0,
+          questionsAnswered: 0,
+          questionsCorrect: 0,
+          blocks: {},
+          updatedAt: Date.now(),
+        }
+
+        const nextUser: UserStats = {
+          ...user,
+          testsCompleted: user.testsCompleted + 1,
+          questionsAnswered: user.questionsAnswered + answeredNext,
+          questionsCorrect: user.questionsCorrect + correctNext,
+          blocks: Object.keys(runBlocksNext).reduce<Record<string, BlockStat>>((acc, block) => {
+            const prev = user.blocks[block] ?? { answered: 0, correct: 0 }
+            const add = runBlocksNext[block]!
+            acc[block] = {
+              answered: prev.answered + add.answered,
+              correct: prev.correct + add.correct,
+            }
+            return acc
+          }, { ...user.blocks }),
+          updatedAt: Date.now(),
+        }
+
+        saveStats({ ...store, users: { ...store.users, [nick]: nextUser } })
+      }
       setScreen('result')
       return
     }
@@ -145,7 +256,20 @@ function App() {
     setReveal('none')
     setAnswered(0)
     setCorrect(0)
+    setRunBlocks({})
     setLastWasCorrect(null)
+    setActiveNickname(null)
+  }
+
+  const openAdmin = () => {
+    const pw = window.prompt('Пароль администратора')
+    if (pw === null) return
+    if (pw !== getAdminPassword()) {
+      window.alert('Неверный пароль')
+      return
+    }
+    setAdminAuthed(true)
+    setScreen('admin')
   }
 
   return (
@@ -159,6 +283,17 @@ function App() {
         <section className="panel">
           <h1>Запуск</h1>
           <div className="formRow">
+            <label>
+              Никнейм
+              <input
+                value={nickname}
+                onChange={(e) => setNickname(e.target.value)}
+                placeholder="Например: ivan_01"
+                inputMode="text"
+                autoComplete="nickname"
+              />
+              <span className="help">Нужен для сохранения статистики</span>
+            </label>
             <label>
               Дисциплина
               <select
@@ -208,7 +343,7 @@ function App() {
               </div>
             </div>
             <div className="score">
-              Правильно: <b>{correct}</b> / {answered}
+              Правильно: <b>{correct}</b> / {answered || '—'}
             </div>
           </div>
 
@@ -220,15 +355,16 @@ function App() {
             {current.options.map((opt, optionIndex) => {
               const isPicked = picked.includes(optionIndex)
               const isCorrect = current.answer.includes(optionIndex)
-              const state =
-                reveal !== 'none' && (isCorrect ? 'correct' : isPicked ? 'wrong' : 'idle')
+              const state = reveal === 'none' ? '' : isCorrect ? 'correct' : isPicked ? 'wrong' : ''
+              const pickedCls = reveal === 'none' && isPicked ? 'picked' : ''
 
               return (
                 <button
                   key={optionIndex}
                   type="button"
-                  className={`option ${state}`}
+                  className={['option', state, pickedCls].filter(Boolean).join(' ')}
                   onClick={() => togglePick(optionIndex)}
+                  aria-pressed={isPicked}
                 >
                   <span className="optLabel">
                     {OPTION_LABELS[optionIndex] ?? optionIndex + 1}
@@ -275,12 +411,17 @@ function App() {
           <h1>Результат</h1>
           <div className="resultCard">
             <div className="big">
-              {correct} / {quiz.length}
+              {correct} / {answered || 0}
             </div>
             <div className="small">
-              Точность: {quiz.length ? Math.round((correct / quiz.length) * 100) : 0}%
+              Точность: {answered ? Math.round((correct / answered) * 100) : 0}% · Вопросов: {quiz.length}
             </div>
           </div>
+          {!!activeNickname && (
+            <div className="meta">
+              Сохранено для: <b>{activeNickname}</b>
+            </div>
+          )}
           <div className="actions">
             <button className="primary" onClick={start} disabled={quiz.length === 0}>
               Пройти еще раз
@@ -292,8 +433,81 @@ function App() {
         </section>
       )}
 
+      {screen === 'admin' && (
+        <section className="panel">
+          <h1>Админ: статистика</h1>
+          {!adminAuthed ? (
+            <div className="meta">Доступ закрыт</div>
+          ) : (
+            <>
+              <div className="meta">
+                Пароль можно переопределить через <code>VITE_ADMIN_PASSWORD</code> или в браузере (ключ{' '}
+                <code>{ADMIN_PASSWORD_KEY}</code>).
+              </div>
+              <div className="adminUsers">
+                {(() => {
+                  const store = loadStats()
+                  const users = Object.entries(store.users).sort((a, b) => b[1].testsCompleted - a[1].testsCompleted)
+                  if (!users.length) return <div className="meta">Пока нет сохраненной статистики</div>
+
+                  return users.map(([nick, st]) => (
+                    <details key={nick} className="adminUser">
+                      <summary>
+                        <span className="adminNick">{nick}</span>
+                        <span className="adminKpi">
+                          Тестов: <b>{st.testsCompleted}</b>
+                        </span>
+                        <span className="adminKpi">
+                          Точность: <b>{percent(st.questionsCorrect, st.questionsAnswered)}</b>
+                        </span>
+                      </summary>
+                      <div className="adminBody">
+                        <div className="meta">
+                          Вопросов отвечено: <b>{st.questionsAnswered}</b> · Правильно:{' '}
+                          <b>{st.questionsCorrect}</b>
+                        </div>
+                        <div className="adminBlocks">
+                          {Object.entries(st.blocks)
+                            .sort((a, b) => b[1].answered - a[1].answered)
+                            .map(([block, bs]) => (
+                              <div key={block} className="adminBlock">
+                                <span className="adminBlockName">{block}</span>
+                                <span className="adminBlockKpi">
+                                  {bs.correct}/{bs.answered} ({percent(bs.correct, bs.answered)})
+                                </span>
+                              </div>
+                            ))}
+                        </div>
+                      </div>
+                    </details>
+                  ))
+                })()}
+              </div>
+            </>
+          )}
+          <div className="actions">
+            <button className="primary" onClick={() => setScreen('setup')}>
+              Назад
+            </button>
+            <button
+              className="ghost"
+              onClick={() => {
+                setAdminAuthed(false)
+                setScreen('setup')
+              }}
+            >
+              Выйти
+            </button>
+          </div>
+        </section>
+      )}
+
       <footer className="footer">
         Данные: <code>госы.docx</code> (парсер: <code>scripts/parse_docx_questions.py</code>)
+        {' · '}
+        <button type="button" className="linkLike" onClick={openAdmin}>
+          Админ-статистика
+        </button>
       </footer>
     </div>
   )
