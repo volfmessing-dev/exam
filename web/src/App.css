@@ -394,11 +394,34 @@ button:disabled {
 }
 
 @media (max-width: 520px) {
-  .bar {
-    width: 52vw;
+  .panel {
+    padding: 14px;
   }
 
-  select {
-    min-width: 100%;
+  .topline {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .bar {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .formRow {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .check {
+    margin-top: 0;
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .actions button {
+    flex: 1 1 auto;
+    width: 100%;
   }
 }
