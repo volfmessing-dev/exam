@@ -1,0 +1,14 @@
+.DS_Store
+.idea
+.vscode
+
+**/node_modules
+**/dist
+**/.turbo
+**/.cache
+
+web/.eslintcache
+web/.env*
+
+*.log
+
