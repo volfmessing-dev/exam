@@ -45,11 +45,26 @@ type StatsStore = {
   users: Record<string, UserStats>
 }
 
+type StatsDeltaV1 = {
+  version: 1
+  nick: string
+  questionsAnswered?: number
+  questionsCorrect?: number
+  testsCompleted?: number
+  blocks?: Record<string, BlockStat>
+  timeMsTotal?: number
+  timeMsByBlock?: Record<string, number>
+  createdAt: number
+}
+
 const STATS_KEY_V1 = 'gosi_stats_v1'
 const STATS_KEY_V2 = 'gosi_stats_v2'
+const STATS_OUTBOX_KEY_V1 = 'gosi_stats_outbox_v1'
 const RUN_KEY_V1 = 'gosi_run_v1'
 const NICKNAME_KEY = 'gosi_nickname'
 const ADMIN_PASSWORD_KEY = 'gosi_admin_password'
+
+const STATS_API_BASE = String(import.meta.env.VITE_STATS_API_BASE || '').replace(/\/+$/, '')
 
 function safeJsonParse<T>(raw: string | null): T | null {
   if (!raw) return null
@@ -85,8 +100,185 @@ function saveStats(store: StatsStore): void {
   localStorage.setItem(STATS_KEY_V2, JSON.stringify(store))
 }
 
+function loadOutbox(): StatsDeltaV1[] {
+  const parsed = safeJsonParse<unknown>(localStorage.getItem(STATS_OUTBOX_KEY_V1))
+  if (!Array.isArray(parsed)) return []
+  return parsed.filter((d): d is StatsDeltaV1 => !!d && typeof d === 'object' && (d as StatsDeltaV1).version === 1 && typeof (d as StatsDeltaV1).nick === 'string')
+}
+
+function saveOutbox(items: StatsDeltaV1[]): void {
+  localStorage.setItem(STATS_OUTBOX_KEY_V1, JSON.stringify(items))
+}
+
+function applyDeltaToStore(store: StatsStore, delta: StatsDeltaV1, now = Date.now()): StatsStore {
+  const nick = delta.nick.trim()
+  if (!nick) return store
+
+  const prev = store.users[nick] ?? {
+    testsCompleted: 0,
+    questionsAnswered: 0,
+    questionsCorrect: 0,
+    blocks: {},
+    timeMsTotal: 0,
+    timeMsByBlock: {},
+    updatedAt: now,
+  }
+
+  const nextBlocks = Object.keys(delta.blocks ?? {}).reduce<Record<string, BlockStat>>((acc, block) => {
+    const add = (delta.blocks ?? {})[block]!
+    const prevBlock = acc[block] ?? { answered: 0, correct: 0 }
+    acc[block] = {
+      answered: prevBlock.answered + Math.max(0, add.answered ?? 0),
+      correct: prevBlock.correct + Math.max(0, add.correct ?? 0),
+    }
+    return acc
+  }, { ...prev.blocks })
+
+  const nextTimeByBlock = Object.keys(delta.timeMsByBlock ?? {}).reduce<Record<string, number>>((acc, block) => {
+    acc[block] = (acc[block] ?? 0) + Math.max(0, (delta.timeMsByBlock ?? {})[block] ?? 0)
+    return acc
+  }, { ...(prev.timeMsByBlock ?? {}) })
+
+  const nextUser: UserStats = {
+    ...prev,
+    testsCompleted: prev.testsCompleted + Math.max(0, delta.testsCompleted ?? 0),
+    questionsAnswered: prev.questionsAnswered + Math.max(0, delta.questionsAnswered ?? 0),
+    questionsCorrect: prev.questionsCorrect + Math.max(0, delta.questionsCorrect ?? 0),
+    blocks: nextBlocks,
+    timeMsTotal: (prev.timeMsTotal ?? 0) + Math.max(0, delta.timeMsTotal ?? 0),
+    timeMsByBlock: nextTimeByBlock,
+    updatedAt: now,
+  }
+
+  return { ...store, users: { ...store.users, [nick]: nextUser } }
+}
+
+function pushDeltaToOutbox(delta: StatsDeltaV1): void {
+  const hasAny =
+    (delta.testsCompleted ?? 0) > 0 ||
+    (delta.questionsAnswered ?? 0) > 0 ||
+    (delta.questionsCorrect ?? 0) > 0 ||
+    (delta.timeMsTotal ?? 0) > 0 ||
+    Object.keys(delta.blocks ?? {}).length > 0 ||
+    Object.keys(delta.timeMsByBlock ?? {}).length > 0
+  if (!hasAny) return
+
+  const outbox = loadOutbox()
+  const idx = outbox.findIndex((d) => d.nick === delta.nick)
+  if (idx === -1) {
+    outbox.push(delta)
+  } else {
+    const prev = outbox[idx]!
+    const nextBlocks = Object.keys({ ...(prev.blocks ?? {}), ...(delta.blocks ?? {}) }).reduce<Record<string, BlockStat>>((acc, block) => {
+      const a = (prev.blocks ?? {})[block] ?? { answered: 0, correct: 0 }
+      const b = (delta.blocks ?? {})[block] ?? { answered: 0, correct: 0 }
+      acc[block] = { answered: Math.max(0, a.answered) + Math.max(0, b.answered), correct: Math.max(0, a.correct) + Math.max(0, b.correct) }
+      return acc
+    }, {})
+
+    const nextTimeByBlock = Object.keys({ ...(prev.timeMsByBlock ?? {}), ...(delta.timeMsByBlock ?? {}) }).reduce<Record<string, number>>((acc, block) => {
+      acc[block] = Math.max(0, (prev.timeMsByBlock ?? {})[block] ?? 0) + Math.max(0, (delta.timeMsByBlock ?? {})[block] ?? 0)
+      return acc
+    }, {})
+
+    outbox[idx] = {
+      version: 1,
+      nick: prev.nick,
+      testsCompleted: Math.max(0, prev.testsCompleted ?? 0) + Math.max(0, delta.testsCompleted ?? 0),
+      questionsAnswered: Math.max(0, prev.questionsAnswered ?? 0) + Math.max(0, delta.questionsAnswered ?? 0),
+      questionsCorrect: Math.max(0, prev.questionsCorrect ?? 0) + Math.max(0, delta.questionsCorrect ?? 0),
+      blocks: nextBlocks,
+      timeMsTotal: Math.max(0, prev.timeMsTotal ?? 0) + Math.max(0, delta.timeMsTotal ?? 0),
+      timeMsByBlock: nextTimeByBlock,
+      createdAt: prev.createdAt,
+    }
+  }
+  saveOutbox(outbox)
+}
+
+async function fetchJsonWithTimeout(url: string, ms: number): Promise<unknown | null> {
+  const ctrl = new AbortController()
+  const id = window.setTimeout(() => ctrl.abort(), ms)
+  try {
+    const res = await fetch(url, { signal: ctrl.signal })
+    if (!res.ok) return null
+    return (await res.json()) as unknown
+  } catch {
+    return null
+  } finally {
+    window.clearTimeout(id)
+  }
+}
+
+async function postJsonWithTimeout(url: string, body: unknown, ms: number): Promise<boolean> {
+  const ctrl = new AbortController()
+  const id = window.setTimeout(() => ctrl.abort(), ms)
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+    })
+    return res.ok
+  } catch {
+    return false
+  } finally {
+    window.clearTimeout(id)
+  }
+}
+
+function apiUrl(pathname: string): string {
+  if (!STATS_API_BASE) return pathname
+  return `${STATS_API_BASE}${pathname}`
+}
+
+async function probeRemote(): Promise<boolean> {
+  const res = await fetchJsonWithTimeout(apiUrl('/api/health'), 1500)
+  return !!res && typeof res === 'object'
+}
+
+async function hydrateStatsFromRemote(): Promise<void> {
+  const remoteRaw = await fetchJsonWithTimeout(apiUrl('/api/stats'), 2500)
+  if (!remoteRaw || typeof remoteRaw !== 'object') return
+  const remote = remoteRaw as Partial<StatsStore>
+  if (remote.version !== 2 || !remote.users || typeof remote.users !== 'object') return
+
+  // Make server snapshot the local baseline (so stats survive localStorage resets),
+  // then re-apply local pending deltas (outbox) on top.
+  saveStats(remote as StatsStore)
+  const outbox = loadOutbox()
+  if (!outbox.length) return
+
+  const now = Date.now()
+  const merged = outbox.reduce((acc, d) => applyDeltaToStore(acc, d, now), loadStats())
+  saveStats(merged)
+}
+
+async function flushOutbox(): Promise<void> {
+  const outbox = loadOutbox()
+  if (!outbox.length) return
+
+  for (let i = 0; i < outbox.length; i++) {
+    const delta = outbox[i]!
+    const ok = await postJsonWithTimeout(apiUrl('/api/stats/delta'), delta, 2500)
+    if (!ok) {
+      // If remote is down, stop to avoid burning requests.
+      saveOutbox(outbox.slice(i))
+      return
+    }
+  }
+
+  saveOutbox([])
+}
+
 function getAdminPassword(): string {
   return import.meta.env.VITE_ADMIN_PASSWORD || localStorage.getItem(ADMIN_PASSWORD_KEY) || ''
+}
+
+async function deleteUsersRemote(nicks: string[]): Promise<boolean> {
+  const payload = { version: 1, nicks }
+  return await postJsonWithTimeout(apiUrl('/api/stats/users/delete'), payload, 4000)
 }
 
 function upsertBlock(prev: Record<string, BlockStat>, block: string, ok: boolean): Record<string, BlockStat> {
@@ -182,6 +374,7 @@ function App() {
   const [nickname, setNickname] = useState<string>(() => localStorage.getItem(NICKNAME_KEY) ?? '')
   const [activeNickname, setActiveNickname] = useState<string | null>(null)
   const [adminAuthed, setAdminAuthed] = useState<boolean>(false)
+  const [adminSelectedUsers, setAdminSelectedUsers] = useState<Record<string, boolean>>({})
 
   const [quizSourceIndices, setQuizSourceIndices] = useState<number[]>([])
   const [quiz, setQuiz] = useState<Question[]>([])
@@ -204,6 +397,8 @@ function App() {
   const statsSyncedRunBlocksRef = useRef<Record<string, BlockStat>>({})
   const statsSyncedTimeCommittedMsRef = useRef<number>(0)
   const statsSyncedBlockTimeCommittedMsRef = useRef<Record<string, number>>({})
+  const remoteAvailableRef = useRef<boolean>(false)
+  const lastRemoteAttemptAtRef = useRef<number>(0)
 
   const [timerNow, setTimerNow] = useState<number>(() => Date.now())
   const [questionStartedAt, setQuestionStartedAt] = useState<number | null>(null)
@@ -215,6 +410,43 @@ function App() {
   useEffect(() => {
     localStorage.setItem(NICKNAME_KEY, nickname)
   }, [nickname])
+
+  useEffect(() => {
+    const init = async () => {
+      lastRemoteAttemptAtRef.current = Date.now()
+      const ok = await probeRemote()
+      remoteAvailableRef.current = ok
+      if (!ok) return
+      await hydrateStatsFromRemote()
+      await flushOutbox()
+    }
+    void init()
+  }, [])
+
+  const syncRemoteNow = async (): Promise<void> => {
+    const ok = await probeRemote()
+    remoteAvailableRef.current = ok
+    if (!ok) return
+    await hydrateStatsFromRemote()
+    await flushOutbox()
+  }
+
+  const maybeSyncRemote = (now = Date.now()) => {
+    const cooldownMs = 5000
+    if (now - lastRemoteAttemptAtRef.current < cooldownMs) return
+    lastRemoteAttemptAtRef.current = now
+
+    const run = async () => {
+      if (!remoteAvailableRef.current) {
+        const ok = await probeRemote()
+        remoteAvailableRef.current = ok
+        if (!ok) return
+        await hydrateStatsFromRemote()
+      }
+      await flushOutbox()
+    }
+    void run()
+  }
 
   useEffect(() => {
     const snapshotRaw = safeJsonParse<unknown>(sessionStorage.getItem(RUN_KEY_V1))
@@ -409,6 +641,17 @@ function App() {
 
     saveStats({ ...store, users: { ...store.users, [nick]: nextUser } })
 
+    pushDeltaToOutbox({
+      version: 1,
+      nick,
+      questionsAnswered: deltaAnswered,
+      questionsCorrect: deltaCorrect,
+      blocks: deltaRunBlocks,
+      timeMsTotal: deltaTime,
+      timeMsByBlock: deltaBlockTime,
+      createdAt: now,
+    })
+
     statsSyncedAnsweredRef.current = answeredTotal
     statsSyncedCorrectRef.current = correctTotal
     statsSyncedRunBlocksRef.current = runBlocksTotal
@@ -416,6 +659,27 @@ function App() {
     statsSyncedBlockTimeCommittedMsRef.current = blockTimeCommittedMsRef.current
 
     persistRunSnapshot(now)
+
+    // Best-effort background sync.
+    maybeSyncRemote(now)
+  }
+
+  const bumpTestsCompleted = (nick: string, now = Date.now()) => {
+    const store = loadStats()
+    const user = store.users[nick] ?? {
+      testsCompleted: 0,
+      questionsAnswered: 0,
+      questionsCorrect: 0,
+      blocks: {},
+      timeMsTotal: 0,
+      timeMsByBlock: {},
+      updatedAt: now,
+    }
+    const nextUser: UserStats = { ...user, testsCompleted: user.testsCompleted + 1, updatedAt: now }
+    saveStats({ ...store, users: { ...store.users, [nick]: nextUser } })
+
+    pushDeltaToOutbox({ version: 1, nick, testsCompleted: 1, createdAt: now })
+    maybeSyncRemote(now)
   }
 
   useEffect(() => {
@@ -429,6 +693,19 @@ function App() {
       if (document.hidden) persistRunSnapshot()
     }
     const onPageHide = () => persistRunSnapshot()
+    document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('pagehide', onPageHide)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('pagehide', onPageHide)
+    }
+  }, [])
+
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.hidden) maybeSyncRemote(Date.now())
+    }
+    const onPageHide = () => maybeSyncRemote(Date.now())
     document.addEventListener('visibilitychange', onVisibility)
     window.addEventListener('pagehide', onPageHide)
     return () => {
@@ -582,17 +859,7 @@ function App() {
       clearRunSnapshot()
       const nick = activeNickname
       if (nick) {
-        const store = loadStats()
-        const user = store.users[nick]
-        if (user) {
-          saveStats({
-            ...store,
-            users: {
-              ...store.users,
-              [nick]: { ...user, testsCompleted: user.testsCompleted + 1, updatedAt: now },
-            },
-          })
-        }
+        bumpTestsCompleted(nick, now)
       }
       setQueue([])
       setScreen('result')
@@ -638,20 +905,50 @@ function App() {
   const openAdmin = () => {
     const configured = getAdminPassword()
     if (!configured) {
-      const nextPw = window.prompt('Админ-пароль не настроен. Задайте новый (сохранится в этом браузере)')
+      const nextPw = window.prompt('Пароль не настроен. Задайте новый (сохранится в этом браузере)')
       if (!nextPw) return
       localStorage.setItem(ADMIN_PASSWORD_KEY, nextPw)
       setAdminAuthed(true)
+      setAdminSelectedUsers({})
       setScreen('admin')
+      void syncRemoteNow()
       return
     }
 
-    const pw = window.prompt('Пароль администратора')
+    const pw = window.prompt('Пароль администратора (логин: admin)')
     if (pw === null) return
     if (pw !== configured) return void window.alert('Неверный пароль')
 
     setAdminAuthed(true)
+    setAdminSelectedUsers({})
     setScreen('admin')
+    void syncRemoteNow()
+  }
+
+  const deleteSelectedUsers = async () => {
+    const store = loadStats()
+    const selected = Object.entries(adminSelectedUsers)
+      .filter(([, v]) => !!v)
+      .map(([nick]) => nick)
+      .filter((nick) => !!store.users[nick])
+    if (!selected.length) return void window.alert('Ничего не выбрано')
+
+    const ok = await probeRemote()
+    remoteAvailableRef.current = ok
+    if (!ok) return void window.alert('Сервер статистики недоступен (удаление отключено)')
+
+    const confirm = window.confirm(`Удалить выбранные записи (${selected.length})?`)
+    if (!confirm) return
+
+    const remoteOk = await deleteUsersRemote(selected)
+    if (!remoteOk) return void window.alert('Не удалось удалить на сервере')
+
+    const nextUsers = { ...store.users }
+    for (const nick of selected) delete nextUsers[nick]
+    saveStats({ ...store, users: nextUsers })
+    saveOutbox(loadOutbox().filter((d) => !selected.includes(d.nick)))
+    setAdminSelectedUsers({})
+    await syncRemoteNow()
   }
 
   return (
@@ -855,6 +1152,30 @@ function App() {
             <div className="meta">Доступ закрыт</div>
           ) : (
             <>
+              <div className="actions">
+                <button
+                  className="ghost"
+                  onClick={() => {
+                    const store = loadStats()
+                    const users = Object.keys(store.users)
+                    if (!users.length) return
+                    const allSelected = users.every((u) => adminSelectedUsers[u])
+                    const next = users.reduce<Record<string, boolean>>((acc, u) => {
+                      acc[u] = !allSelected
+                      return acc
+                    }, {})
+                    setAdminSelectedUsers(next)
+                  }}
+                >
+                  Выбрать все
+                </button>
+                <button className="ghost" onClick={() => setAdminSelectedUsers({})}>
+                  Снять выбор
+                </button>
+                <button className="primary" onClick={() => void deleteSelectedUsers()}>
+                  Удалить выбранные
+                </button>
+              </div>
               <div className="adminUsers">
                 {(() => {
                   const store = loadStats()
@@ -864,6 +1185,13 @@ function App() {
                   return users.map(([nick, st]) => (
                     <details key={nick} className="adminUser">
                       <summary>
+                        <input
+                          type="checkbox"
+                          checked={!!adminSelectedUsers[nick]}
+                          onChange={(e) => setAdminSelectedUsers((prev) => ({ ...prev, [nick]: e.target.checked }))}
+                          onClick={(e) => e.stopPropagation()}
+                          aria-label={`Выбрать ${nick}`}
+                        />
                         <span className="adminNick">{nick}</span>
                         <span className="adminKpi">
                           Тестов: <b>{st.testsCompleted}</b>
@@ -909,6 +1237,7 @@ function App() {
               className="ghost"
               onClick={() => {
                 setAdminAuthed(false)
+                setAdminSelectedUsers({})
                 setScreen('setup')
               }}
             >

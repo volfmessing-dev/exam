@@ -9,10 +9,20 @@ COPY web ./web
 RUN cd web && npm run build
 
 
-FROM nginx:1.27-alpine
+FROM node:18-alpine
 
-COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
-COPY --from=builder /app/web/dist /usr/share/nginx/html
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV PORT=8080
+ENV STATIC_DIR=/app/public
+ENV STATS_FILE=/data/stats.json
+
+RUN mkdir -p /data
+
+COPY --from=builder /app/web/dist ./public
+COPY server ./server
 
 EXPOSE 8080
 
+CMD ["node", "server/index.js"]

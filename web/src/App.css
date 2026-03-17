@@ -367,6 +367,16 @@ button:disabled {
   list-style: none;
 }
 
+.adminUser summary input[type='checkbox'] {
+  appearance: auto;
+  width: auto;
+  padding: 0;
+  margin: 0;
+  transform: translateY(1px);
+  border: none;
+  background: transparent;
+}
+
 .adminUser summary::-webkit-details-marker {
   display: none;
 }
