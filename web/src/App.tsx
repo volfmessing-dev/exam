@@ -47,6 +47,7 @@ type StatsStore = {
 
 const STATS_KEY_V1 = 'gosi_stats_v1'
 const STATS_KEY_V2 = 'gosi_stats_v2'
+const RUN_KEY_V1 = 'gosi_run_v1'
 const NICKNAME_KEY = 'gosi_nickname'
 const ADMIN_PASSWORD_KEY = 'gosi_admin_password'
 
@@ -145,6 +146,25 @@ function sameSet(a: number[], b: number[]): boolean {
 
 type Screen = 'setup' | 'quiz' | 'result'
 
+type RunState = {
+  version: 1
+  screen: 'quiz'
+  discipline: string
+  shuffle: boolean
+  activeNickname: string | null
+  quizSourceIndices: number[]
+  queue: number[]
+  picked: number[]
+  reveal: 'none' | 'checked'
+  answered: number
+  correct: number
+  lastWasCorrect: boolean | null
+  runBlocks: Record<string, BlockStat>
+  timeCommittedMs: number
+  blockTimeCommittedMs: Record<string, number>
+  savedAt: number
+}
+
 function App() {
   const disciplines = useMemo(() => {
     return Array.from(new Set(data.questions.map((q) => q.discipline))).sort()
@@ -157,6 +177,7 @@ function App() {
   const [activeNickname, setActiveNickname] = useState<string | null>(null)
   const [adminAuthed, setAdminAuthed] = useState<boolean>(false)
 
+  const [quizSourceIndices, setQuizSourceIndices] = useState<number[]>([])
   const [quiz, setQuiz] = useState<Question[]>([])
   const [queue, setQueue] = useState<number[]>([])
   const [picked, setPicked] = useState<number[]>([])
@@ -181,6 +202,116 @@ function App() {
   useEffect(() => {
     localStorage.setItem(NICKNAME_KEY, nickname)
   }, [nickname])
+
+  useEffect(() => {
+    const snapshot = safeJsonParse<RunState>(sessionStorage.getItem(RUN_KEY_V1))
+    if (!snapshot || snapshot.version !== 1 || snapshot.screen !== 'quiz') return
+
+    if (!Array.isArray(snapshot.quizSourceIndices) || snapshot.quizSourceIndices.length === 0) return
+    if (!Array.isArray(snapshot.queue) || snapshot.queue.length === 0) return
+    if (!snapshot.quizSourceIndices.every((i) => Number.isInteger(i) && i >= 0 && i < data.questions.length)) return
+    if (!snapshot.queue.every((q) => Number.isInteger(q) && q >= 0 && q < snapshot.quizSourceIndices.length)) return
+
+    const now = Date.now()
+    const restoredQuiz = snapshot.quizSourceIndices.map((i) => data.questions[i]!)
+
+    setDiscipline(snapshot.discipline)
+    setShuffle(snapshot.shuffle)
+    setActiveNickname(snapshot.activeNickname)
+    setQuizSourceIndices(snapshot.quizSourceIndices)
+    setQuiz(restoredQuiz)
+    setQueue(snapshot.queue)
+    setPicked(snapshot.picked ?? [])
+    setReveal(snapshot.reveal ?? 'none')
+    setAnswered(snapshot.answered ?? 0)
+    setCorrect(snapshot.correct ?? 0)
+    setLastWasCorrect(snapshot.lastWasCorrect ?? null)
+    setRunBlocks(snapshot.runBlocks ?? {})
+
+    questionStartedAtRef.current = now
+    timeCommittedMsRef.current = snapshot.timeCommittedMs ?? 0
+    blockTimeCommittedMsRef.current = snapshot.blockTimeCommittedMs ?? {}
+    setTimerNow(now)
+    setQuestionStartedAt(now)
+    setTimeCommittedMs(timeCommittedMsRef.current)
+    setBlockTimeCommittedMs(blockTimeCommittedMsRef.current)
+
+    setScreen('quiz')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const buildRunSnapshot = (now = Date.now()): RunState | null => {
+    if (screen !== 'quiz') return null
+    if (!quizSourceIndices.length) return null
+    if (!queue.length) return null
+
+    let timeTotal = timeCommittedMsRef.current
+    const byBlock: Record<string, number> = { ...blockTimeCommittedMsRef.current }
+
+    const startedAt = questionStartedAtRef.current
+    const headPos = queue[0]!
+    const headSourceIndex = quizSourceIndices[headPos]
+    const head = typeof headSourceIndex === 'number' ? data.questions[headSourceIndex] : undefined
+    if (startedAt !== null && head) {
+      const elapsed = Math.max(0, now - startedAt)
+      timeTotal += elapsed
+      byBlock[head.discipline] = (byBlock[head.discipline] ?? 0) + elapsed
+    }
+
+    return {
+      version: 1,
+      screen: 'quiz',
+      discipline,
+      shuffle,
+      activeNickname,
+      quizSourceIndices,
+      queue,
+      picked,
+      reveal,
+      answered,
+      correct,
+      lastWasCorrect,
+      runBlocks,
+      timeCommittedMs: timeTotal,
+      blockTimeCommittedMs: byBlock,
+      savedAt: now,
+    }
+  }
+
+  const persistRunSnapshot = (now = Date.now()) => {
+    const snapshot = buildRunSnapshot(now)
+    if (!snapshot) return
+    sessionStorage.setItem(RUN_KEY_V1, JSON.stringify(snapshot))
+  }
+
+  const clearRunSnapshot = () => {
+    sessionStorage.removeItem(RUN_KEY_V1)
+  }
+
+  useEffect(() => {
+    if (screen !== 'quiz') return
+    persistRunSnapshot()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [screen, discipline, shuffle, activeNickname, quizSourceIndices, queue, picked, reveal, answered, correct, lastWasCorrect, runBlocks])
+
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.hidden) persistRunSnapshot()
+    }
+    const onPageHide = () => persistRunSnapshot()
+    document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('pagehide', onPageHide)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('pagehide', onPageHide)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (screen !== 'quiz') return
+    const id = window.setInterval(() => persistRunSnapshot(), 5000)
+    return () => window.clearInterval(id)
+  }, [screen])
 
   useEffect(() => {
     if (screen !== 'quiz') return
@@ -209,13 +340,22 @@ function App() {
 
   const start = () => {
     const nick = nickname.trim()
-    const filtered =
+    const filteredIndices =
       discipline === '__all__'
-        ? data.questions
-        : data.questions.filter((q) => q.discipline === discipline)
+        ? data.questions.map((_, i) => i)
+        : data.questions.reduce<number[]>((acc, q, i) => {
+            if (q.discipline === discipline) acc.push(i)
+            return acc
+          }, [])
 
-    const next = [...filtered]
-    if (shuffle) shuffleInPlace(next, Date.now())
+    if (!filteredIndices.length) {
+      window.alert('Нет вопросов для выбранной дисциплины')
+      return
+    }
+
+    const nextIndices = [...filteredIndices]
+    if (shuffle) shuffleInPlace(nextIndices, Date.now())
+    const next = nextIndices.map((i) => data.questions[i]!)
 
     const now = Date.now()
     questionStartedAtRef.current = now
@@ -226,6 +366,7 @@ function App() {
     setTimeCommittedMs(0)
     setBlockTimeCommittedMs({})
 
+    setQuizSourceIndices(nextIndices)
     setQuiz(next)
     setQueue(next.map((_, i) => i))
     setPicked([])
@@ -292,6 +433,7 @@ function App() {
 
     const nextQueue = queue.slice(1)
     if (nextQueue.length === 0) {
+      clearRunSnapshot()
       const nick = activeNickname
       if (nick) {
         const store = loadStats()
@@ -342,7 +484,9 @@ function App() {
 
   const reset = () => {
     setScreen('setup')
+    clearRunSnapshot()
     setQuiz([])
+    setQuizSourceIndices([])
     setQueue([])
     setPicked([])
     setReveal('none')
