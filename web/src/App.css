@@ -96,7 +96,7 @@
 .formRow {
   display: flex;
   gap: 12px;
-  align-items: flex-end;
+  align-items: flex-start;
   flex-wrap: wrap;
 }
 
@@ -108,13 +108,23 @@ label {
   color: rgba(20, 20, 25, 0.78);
 }
 
+.field {
+  flex: 1 1 260px;
+  min-width: 240px;
+}
+
+.fieldDiscipline {
+  flex: 2 1 520px;
+}
+
 select {
   appearance: none;
   border-radius: 12px;
   border: 1px solid rgba(20, 20, 25, 0.14);
   background: rgba(255, 255, 255, 0.9);
   padding: 10px 12px;
-  min-width: min(560px, 80vw);
+  width: 100%;
+  min-width: 0;
   font-size: 13px;
 }
 
@@ -123,7 +133,8 @@ input {
   border: 1px solid rgba(20, 20, 25, 0.14);
   background: rgba(255, 255, 255, 0.9);
   padding: 10px 12px;
-  min-width: min(280px, 60vw);
+  width: 100%;
+  min-width: 0;
   font-size: 13px;
 }
 
@@ -137,6 +148,7 @@ input {
   align-items: center;
   gap: 8px;
   padding: 10px 12px;
+  margin-top: 18px;
   border-radius: 12px;
   border: 1px solid rgba(20, 20, 25, 0.14);
   background: rgba(255, 255, 255, 0.65);

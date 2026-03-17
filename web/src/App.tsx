@@ -283,7 +283,7 @@ function App() {
         <section className="panel">
           <h1>Запуск</h1>
           <div className="formRow">
-            <label>
+            <label className="field">
               Никнейм
               <input
                 value={nickname}
@@ -294,7 +294,7 @@ function App() {
               />
               <span className="help">Нужен для сохранения статистики</span>
             </label>
-            <label>
+            <label className="field fieldDiscipline">
               Дисциплина
               <select
                 value={discipline}
