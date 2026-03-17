@@ -33,4 +33,6 @@ docker compose up --build
 - GitHub Pages: `.github/workflows/pages.yml`
 - Docker image в GHCR: `.github/workflows/ghcr.yml`
 
-Для GitHub Pages один раз включить в репозитории: **Settings → Pages → Source: GitHub Actions**.
+GitHub Pages публикуется через ветку `gh-pages` (workflow пушит сборку в эту ветку).
+
+Один раз в репозитории включить: **Settings → Pages → Build and deployment → Source: Deploy from a branch → Branch: gh-pages /(root)**.
