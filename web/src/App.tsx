@@ -403,6 +403,9 @@ function App() {
                 </button>
               </>
             )}
+            <button className="ghost" onClick={reset}>
+              Покинуть тест
+            </button>
           </div>
         </section>
       )}
