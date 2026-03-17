@@ -3,10 +3,14 @@ name: Deploy to GitHub Pages
 on:
   push:
     branches: ["main"]
+    paths:
+      - "web/**"
+      - ".github/workflows/pages.yml"
   workflow_dispatch:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  NODE_VERSION: 18
 
 permissions:
   contents: write
@@ -17,22 +21,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - id: setup-node
+        uses: actions/setup-node@v4
         with:
-          node-version: 18
+          node-version: ${{ env.NODE_VERSION }}
           cache: "npm"
           cache-dependency-path: web/package-lock.json
 
+      - name: Cache node_modules
+        id: cache-node-modules
+        uses: actions/cache@v4
+        with:
+          path: web/node_modules
+          key: ${{ runner.os }}-node${{ env.NODE_VERSION }}-modules-${{ hashFiles('web/package-lock.json') }}
+
       - name: Install
         working-directory: web
-        run: npm ci
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: npm ci --no-audit --no-fund --prefer-offline
 
       - name: Build
         working-directory: web
         run: npm run build -- --base=/${{ github.event.repository.name }}/
-
-      - name: No Jekyll
-        run: touch web/dist/.nojekyll
 
       - name: Deploy to gh-pages
         env:
